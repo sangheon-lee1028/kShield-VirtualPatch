@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.pyc
+venv/
+.venv/
+
+# eBPF / C build artifacts
+*.o
+*.d
+*.skel.h
+.output/
+
+# Results
+results/
+*.csv
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
