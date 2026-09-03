@@ -37,7 +37,7 @@ static void sig_handler(int signo)
     exiting = 1;
 }
 
-static int handle_event(void *ctx, void *data, size_t data_sz)
+static void handle_event(void *ctx, int cpu, void *data, __u32 data_sz)
 {
     struct shadow_exec_event *e = data;
     time_t now = time(NULL);
@@ -47,7 +47,6 @@ static int handle_event(void *ctx, void *data, size_t data_sz)
     printf("[%s] SHADOW_EXEC 탐지! parent=%s(pid=%u) -> child=%s(pid=%u) exec=%s => SIGKILL 전송\n",
            ts, e->parent_comm, e->ppid, e->comm, e->pid, e->filename);
     fflush(stdout);
-    return 0;
 }
 
 static void handle_lost(void *ctx, int cpu, unsigned long long cnt)
