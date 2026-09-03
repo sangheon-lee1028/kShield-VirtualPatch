@@ -58,16 +58,14 @@ python3 attack/benchmark_vpatch.py --count 500 --output metrics_vpatch_on.csv
 
 ## 상태
 
-**기획 단계.** 코드와 논문 구조는 초안 수준이며, 실제 VM 컴파일·실행 테스트와
-실험 결과 수집이 필요하다. `paper_draft.md`의 `[TODO]` 표시 참고.
+**PoC 검증 완료, 논문 4장(실험) 진행 전 단계.**
 
-**검증 필요 항목:**
-- `kshield_vpatch.bpf.c`가 실제로 컴파일되는지 (특히 `sched_process_exec`
-  트레이스포인트의 `__data_loc_filename` 필드가 대상 커널의 vmlinux.h에
-  동일하게 존재하는지)
-- `mock_ray_server.py`가 실행하는 자식 프로세스의 부모 comm이 실제로
-  `watched_parents[]`(`raylet`, `ray::IDLE`, `python3`)와 일치하는지 —
-  Python `http.server`가 자식 프로세스를 spawn할 때 파이썬 인터프리터
-  이름이 그대로 상속되는지 VM에서 직접 확인 필요
+VM 실측(Ubuntu, 실제 curl 사용)으로 다음을 확인하였다.
+- 빌드: 컴파일·CO-RE 재배치·attach 모두 에러 없이 성공
+- 정상 job(`echo`, `python3 -c ...`) → 오탐 없이 통과
+- 악성 job(`curl ... | sh`, python3 → sh → curl 2단계 체인) → curl exec 시점에
+  정확히 SIGKILL로 차단됨을 `SHADOW_EXEC 탐지!` 로그로 확인
+
+`paper_draft.md`의 4장(실험) 수치는 아직 `[TODO]`이며, N회 반복 성능 측정만 남아있다.
 
 관련 프로젝트: [kShield (원본, 모델 파일 보안)](https://github.com/sangheon-lee1028/Ai-ebpf)

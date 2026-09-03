@@ -23,8 +23,9 @@
  *     실행하는 순간만 탐지한다. 이렇게 하면 몇 단계를 거치든 탐지되면서도,
  *     정상 job(echo, python3 -c ...)은 오탐되지 않는다.
  *
- * TODO(검증 필요): v2도 아직 VM에서 전체 시나리오(정상 job 통과 + 다단계
- * 공격 탐지) 재검증이 필요하다.
+ * 검증 완료: VM 실측(Ubuntu, 실제 curl 사용)에서 정상 job(echo,
+ * python3 -c ...)은 오탐 없이 통과하고, python3 -> sh -> curl 2단계
+ * 공격 체인은 curl exec 시점에 정확히 SIGKILL로 차단됨을 확인하였다.
  */
 #include "vmlinux.h"
 #include <bpf/bpf_helpers.h>
@@ -122,8 +123,6 @@ int trace_lineage_fork(struct trace_event_raw_sched_process_fork *ctx)
     if (already_in_lineage || is_watched_comm(parent_comm)) {
         __u8 flag = 1;
         bpf_map_update_elem(&ai_worker_lineage, &child_pid, &flag, BPF_ANY);
-        bpf_printk("[DEBUG-FORK] lineage 편입: parent=%s(pid=%d) -> child_pid=%d",
-                   parent_comm, parent_pid, child_pid);
     }
 
     return 0;
@@ -153,9 +152,6 @@ int trace_shadow_exec(struct trace_event_raw_sched_process_exec *ctx)
     char filename[MAX_PATH_LEN] = {};
     unsigned fname_off = ctx->__data_loc_filename & 0xFFFF;
     bpf_probe_read_kernel_str(&filename, sizeof(filename), (void *)ctx + fname_off);
-
-    bpf_printk("[DEBUG-EXEC] watched=1 pid=%d parent_comm=%s in_lineage=%d filename=%s",
-               pid, parent_comm, in_lineage != NULL, filename);
 
     /* 3) 실행된 바이너리가 의심 목록(curl/wget/nc 등)에 있는지 확인 */
     int is_suspicious = 0;
