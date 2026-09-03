@@ -122,6 +122,8 @@ int trace_lineage_fork(struct trace_event_raw_sched_process_fork *ctx)
     if (already_in_lineage || is_watched_comm(parent_comm)) {
         __u8 flag = 1;
         bpf_map_update_elem(&ai_worker_lineage, &child_pid, &flag, BPF_ANY);
+        bpf_printk("[DEBUG-FORK] lineage 편입: parent=%s(pid=%d) -> child_pid=%d",
+                   parent_comm, parent_pid, child_pid);
     }
 
     return 0;
@@ -151,6 +153,9 @@ int trace_shadow_exec(struct trace_event_raw_sched_process_exec *ctx)
     char filename[MAX_PATH_LEN] = {};
     unsigned fname_off = ctx->__data_loc_filename & 0xFFFF;
     bpf_probe_read_kernel_str(&filename, sizeof(filename), (void *)ctx + fname_off);
+
+    bpf_printk("[DEBUG-EXEC] watched=1 pid=%d parent_comm=%s in_lineage=%d filename=%s",
+               pid, parent_comm, in_lineage != NULL, filename);
 
     /* 3) 실행된 바이너리가 의심 목록(curl/wget/nc 등)에 있는지 확인 */
     int is_suspicious = 0;
