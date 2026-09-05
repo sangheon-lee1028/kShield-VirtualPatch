@@ -21,6 +21,13 @@ Welch's t-test로 통계적 유의성을 검증한다.
     3) kShield-VirtualPatch 실행 (터미널 B: sudo ./src/kshield_vpatch)
     4) [vpatch_on 측정] `measure --group vpatch_on --runs 10` 수행
     5) `compare`로 두 결과 비교
+
+시스템 전역(무관한 프로세스) 오버헤드 측정: mock_ray_server.py 없이도
+--bench-script로 benchmark_unrelated_connect.py를 지정하면, AI 워커
+계보와 무관한 connect() 성능에 kShield-VirtualPatch가 미치는 영향을
+측정할 수 있다.
+    python3 stat_analysis.py measure --group off_unrelated --runs 10 \\
+        --bench-script attack/benchmark_unrelated_connect.py --port 19999
 """
 
 import argparse
@@ -104,9 +111,9 @@ def welch_ttest(a, b):
 
 
 # ── 벤치마크 1회 실행 ───────────────────────────────────────────────────────
-def run_once(host, port, count, out_path):
+def run_once(host, port, count, out_path, bench_script=None):
     cmd = [
-        sys.executable, BENCH_SCRIPT,
+        sys.executable, bench_script or BENCH_SCRIPT,
         "--host", host, "--port", str(port),
         "--count", str(count), "--output", out_path,
     ]
@@ -136,7 +143,7 @@ def run_repeated(args):
         ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:19]
         out = os.path.join(RESULTS_DIR, f"stat_{args.group}_r{i+1}_{ts}.csv")
         print(f"  Run {i+1}/{args.runs} ...", end="  ", flush=True)
-        s = run_once(args.host, args.port, args.count, out)
+        s = run_once(args.host, args.port, args.count, out, bench_script=args.bench_script)
         thr = s.get("throughput_rps", float("nan"))
         lat = s.get("latency_mean_ms", float("nan"))
         throughputs.append(thr)
@@ -219,6 +226,9 @@ def main():
     m.add_argument("--count", type=int, default=500, help="요청 수 (기본: 500)")
     m.add_argument("--host", default="localhost")
     m.add_argument("--port", type=int, default=8265)
+    m.add_argument("--bench-script", default=None,
+                    help="사용할 벤치마크 스크립트 경로 (기본: benchmark_vpatch.py). "
+                         "예: attack/benchmark_unrelated_connect.py (시스템 전역 오버헤드 측정용)")
 
     c = sub.add_parser("compare", help="두 그룹 t-test 비교")
     c.add_argument("--compare", nargs=2, metavar=("A.csv", "B.csv"), required=True)
