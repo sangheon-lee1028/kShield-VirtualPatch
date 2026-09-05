@@ -31,7 +31,8 @@ kShield-VirtualPatch/
 └── attack/
     ├── mock_ray_server.py      ShadowRay 취약점 재현용 목업 Jobs API
     ├── exploit_shadowray.py    공격(악성 job) 재현 스크립트
-    └── benchmark_vpatch.py     성능 오버헤드 측정 스크립트 (정상 job 반복 제출)
+    ├── benchmark_vpatch.py     성능 오버헤드 측정 스크립트 (정상 job 반복 제출)
+    └── stat_analysis.py        N회 반복 측정 + Welch's t-test 통계 분석
 ```
 
 ## 빠른 시작 (VM에서)
@@ -67,5 +68,27 @@ VM 실측(Ubuntu, 실제 curl 사용)으로 다음을 확인하였다.
   정확히 SIGKILL로 차단됨을 `SHADOW_EXEC 탐지!` 로그로 확인
 
 `paper_draft.md`의 4장(실험) 수치는 아직 `[TODO]`이며, N회 반복 성능 측정만 남아있다.
+
+## 4장 실험: 성능 오버헤드 측정 절차
+
+```bash
+# 터미널 A: mock 서버 실행 (계속 켜 둠)
+python3 attack/mock_ray_server.py
+
+# 터미널 B: [1단계] kShield-VirtualPatch 비활성 상태로 baseline 측정
+python3 attack/stat_analysis.py measure --group vpatch_off --runs 10
+
+# 터미널 B: [2단계] kShield-VirtualPatch 실행 (터미널 C에서)
+sudo ./src/kshield_vpatch
+
+# 터미널 B: [3단계] kShield-VirtualPatch 활성 상태로 측정
+python3 attack/stat_analysis.py measure --group vpatch_on --runs 10
+
+# [4단계] 두 그룹 비교 (Welch's t-test)
+python3 attack/stat_analysis.py compare --compare \
+    attack/results/stats_vpatch_off.csv attack/results/stats_vpatch_on.csv
+```
+
+결과(평균±표준편차, t-stat, p-value)를 `paper_draft.md` 4장의 `[TODO]` 표에 반영한다.
 
 관련 프로젝트: [kShield (원본, 모델 파일 보안)](https://github.com/sangheon-lee1028/Ai-ebpf)
