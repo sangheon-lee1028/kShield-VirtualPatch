@@ -159,16 +159,20 @@ static __always_inline int is_watched_comm(const char *comm)
  * lineage map에 없더라도 직속 부모가 watched_parents[]와 일치하면
  * (예: BPF 프로그램이 fork 이후·exec 이전에 로드된 경우 대비) 계보로
  * 간주한다. parent_comm_out에 직속 부모 comm을 채워 반환한다. */
-static __always_inline int current_is_watched(char *parent_comm_out)
+static __always_inline int current_is_watched(char (*parent_comm_out)[MAX_COMM_LEN])
 {
     __u32 pid = bpf_get_current_pid_tgid() >> 32;
     __u8 *in_lineage = bpf_map_lookup_elem(&ai_worker_lineage, &pid);
 
     struct task_struct *task = (struct task_struct *)bpf_get_current_task();
     struct task_struct *parent = BPF_CORE_READ(task, real_parent);
+    /* 주의: BPF_CORE_READ_STR_INTO는 목적지 버퍼 크기를 sizeof(*dst)로
+     * 추론하므로, 반드시 배열 포인터(char (*)[N]) 타입으로 넘겨야 한다.
+     * 과거 char*로 넘겼다가 sizeof(*dst)==1이 되어 문자열이 사실상
+     * 빈 채로 읽히는 버그가 실측으로 발견된 바 있다. */
     BPF_CORE_READ_STR_INTO(parent_comm_out, parent, comm);
 
-    return (in_lineage != NULL) || is_watched_comm(parent_comm_out);
+    return (in_lineage != NULL) || is_watched_comm(*parent_comm_out);
 }
 
 /*
@@ -210,7 +214,7 @@ SEC("tp/sched/sched_process_exec")
 int trace_shadow_exec(struct trace_event_raw_sched_process_exec *ctx)
 {
     char parent_comm[MAX_COMM_LEN] = {};
-    if (!current_is_watched(parent_comm))
+    if (!current_is_watched(&parent_comm))
         return 0;
 
     /* 실행된 바이너리 경로 읽기 (tracepoint의 __data_loc 필드) */
@@ -271,7 +275,7 @@ SEC("kprobe/tcp_v4_connect")
 int BPF_KPROBE(trace_shadow_connect_v4, struct sock *sk, struct sockaddr *uaddr, int addr_len)
 {
     char parent_comm[MAX_COMM_LEN] = {};
-    if (!current_is_watched(parent_comm))
+    if (!current_is_watched(&parent_comm))
         return 0;
 
     struct sockaddr_in *addr_in = (struct sockaddr_in *)uaddr;
@@ -312,7 +316,7 @@ SEC("kprobe/tcp_v6_connect")
 int BPF_KPROBE(trace_shadow_connect_v6, struct sock *sk, struct sockaddr *uaddr, int addr_len)
 {
     char parent_comm[MAX_COMM_LEN] = {};
-    if (!current_is_watched(parent_comm))
+    if (!current_is_watched(&parent_comm))
         return 0;
 
     struct sockaddr_in6 *addr_in6 = (struct sockaddr_in6 *)uaddr;
