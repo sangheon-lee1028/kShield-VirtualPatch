@@ -6,6 +6,8 @@ lsh66404865@gmail.com
 
 > **작성 상태 안내**: 1~4장(서론, 관련 연구, 설계, 실험)이 VM 실측을 거쳐
 > 완성되었고, 참고문헌은 웹 검색으로 실제 URL·발행일자를 확인하여 정리하였다.
+> 이후 실험적으로 LSM 훅 기반 동기적 사전 차단 컴포넌트(3.5절)를 추가하였으며,
+> 이는 코드 구현만 완료되었고 VM 실측은 아직 수행하지 않았다.
 
 ---
 
@@ -13,7 +15,7 @@ lsh66404865@gmail.com
 
 AI 서빙 프레임워크(Ray, vLLM, Triton 등)에서 발견되는 원격 코드 실행(RCE) 취약점은 벤더의 패치 대응이 지연되거나, 조직 내부적으로 프레임워크 업그레이드가 늦어지는 경우가 많다. 대표적으로 Ray의 Jobs Submission API에 존재하는 인증 부재 취약점(CVE-2023-48022, "ShadowRay")은 벤더가 공식 패치를 제공하지 않은 채 오랜 기간 방치되었고, 실제로 수천 대의 클러스터가 침해되어 암호화폐 채굴 등에 악용되었다. 본 논문은 eBPF를 활용하여 애플리케이션 코드를 수정하거나 재배포하지 않고도, 이러한 취약점이 실제로 악용될 때 나타나는 비정상 행위를 커널 수준에서 탐지·차단하는 가상 패치(virtual patching) 메커니즘 kShield-VirtualPatch를 제안한다. 초기 설계(SHADOW_EXEC)는 `sched_process_exec` 트레이스포인트를 후킹하여, 감시 대상 AI 워커 프로세스의 계보(lineage)가 의심스러운 자식 프로세스(curl, wget 등)를 실행하는 순간을 탐지한다. 그러나 이 방식은 실행 파일 이름 블록리스트에 의존하므로, bash의 내장 TCP 리다이렉션 기능(`/dev/tcp/`)처럼 별도 바이너리를 실행하지 않는 우회에 취약함이 VM 실측으로 확인되었다. 이를 보완하기 위해 `tcp_v4_connect`/`tcp_v6_connect`를 직접 후킹하는 SHADOW_CONNECT를 추가하였다 — "어떤 바이너리를 실행했는가"가 아니라 "AI 워커 계보에서 신뢰되지 않은 목적지로 연결을 시도했는가"를 감시하므로, 바이너리 종류와 무관하게 포착한다. 이 방식은 파일 접근 반복 횟수에 의존하는 기존 빈도 기반 탐지와 달리, 정상적으로는 발생하지 않는 단일 이상 행위를 즉시 포착한다는 점에서 구조적 이점을 가진다.
 
-mock Ray Jobs API 환경에서 python3→sh→curl로 이어지는 2단계 공격 체인은 curl 실행 시점에(SHADOW_EXEC), bash `/dev/tcp/` 기반 우회 시도는 연결 시도 시점에(SHADOW_CONNECT) 각각 즉시 SIGKILL로 차단되었으며, 두 경우 모두 정상 job(echo, python3 -c 등)은 오탐 없이 통과하였다. 10회 반복 성능 측정 결과 kShield-VirtualPatch 활성화로 인한 통계적으로 유의미한 처리량·지연시간 저하는 관측되지 않았다(처리량 p=0.7322, 지연시간 p=0.6956, Welch's t-test).
+mock Ray Jobs API 환경에서 python3→sh→curl로 이어지는 2단계 공격 체인은 curl 실행 시점에(SHADOW_EXEC), bash `/dev/tcp/` 기반 우회 시도는 연결 시도 시점에(SHADOW_CONNECT) 각각 즉시 SIGKILL로 차단되었으며, 두 경우 모두 정상 job(echo, python3 -c 등)은 오탐 없이 통과하였다. 10회 반복 성능 측정 결과 kShield-VirtualPatch 활성화로 인한 통계적으로 유의미한 처리량·지연시간 저하는 관측되지 않았다(처리량 p=0.7322, 지연시간 p=0.6956, Welch's t-test). 다만 SHADOW_EXEC/SHADOW_CONNECT는 모두 행위 발생 "이후" `bpf_send_signal`로 비동기 종료시키는 방식이라는 잔여 한계가 있어, 이를 해소하기 위해 `security_bprm_check_security`/`security_socket_connect` LSM 훅으로 시스템 콜 자체를 동기적으로 실패시키는 사전 차단 컴포넌트를 추가로 구현하였다(3.5절). 이 LSM 컴포넌트는 코드 작성만 완료되었으며 VM 실측은 아직 수행하지 않았다.
 
 **핵심어:** eBPF, 가상 패치, virtual patching, AI 서빙 프레임워크 보안, Ray, ShadowRay, CVE-2023-48022
 
@@ -104,6 +106,8 @@ kShield-VirtualPatch는 저자의 선행 연구 kShield [8]와 동일한 아키�
 └─────────────────────────────────────────────┘
 ```
 
+이 다이어그램은 어디서나(추가 커널 설정 없이) attach 가능한 기본 방어선(kprobe/tracepoint + 비동기 SIGKILL)만을 나타낸다. 3.5절에서 별도로 다루는 실험적 LSM 컴포넌트(`kshield_vpatch_lsm`)는 동일한 판정 로직을 `security_bprm_check_security`/`security_socket_connect` 훅에서 동기적으로 수행하는 독립된 BPF 오브젝트이며, 위 다이어그램에는 포함되지 않는다.
+
 ### 3.3 핵심 탐지 메커니즘 (SHADOW_EXEC, SHADOW_CONNECT)
 
 초기 설계(v1)는 `sched_process_exec` 트레이스포인트에서 새로 실행된 프로세스의 **직속 부모**만 확인하여, 부모 comm이 `watched_parents[]`(감시 대상 AI 워커 프로세스 목록, 예: `raylet`)와 일치하고 실행 파일이 `suspicious_bins[]`와 일치하면 즉시 SIGKILL을 전송하는 방식이었다.
@@ -138,7 +142,22 @@ v2의 SHADOW_EXEC는 `suspicious_bins[]`라는 실행 파일 이름 블록리스
 
 아울러 v2에는 프로세스 종료 시 `ai_worker_lineage` 맵을 정리하는 로직이 없어, PID가 재사용될 경우 무관한 새 프로세스가 죽은 프로세스의 계보 정보를 잘못 물려받을 수 있는 버그가 있었다. v3는 `sched_process_exit` 훅으로 프로세스 종료 시 계보 정보를 제거하여 이를 해결하였다.
 
-**v3의 한계**: SHADOW_CONNECT도 완전한 차단은 아니다. (1) 이미 열려 있는 정상 연결에 얹혀 데이터를 빼가는 경우, (2) 허용된 포트/프로토콜(예: DNS) 위로 데이터를 숨기는 터널링, (3) 네트워크가 아예 필요 없는 로컬 전용 공격은 이 메커니즘으로 포착되지 않는다. 또한 `bpf_send_signal`은 비동기적이므로 `connect()` 진입 시점에 신호를 보내도 완전한 사전 차단을 수학적으로 보장하지는 않는다 — `security_socket_connect` LSM 훅으로 전환하면 연결 자체를 동기적으로 거부할 수 있으나, `CONFIG_BPF_LSM` 및 활성 LSM 스택에 "bpf" 포함이 필요해 배포 환경 의존성이 생기므로 본 논문에서는 채택하지 않았다(향후 연구 참고).
+**v3의 한계**: SHADOW_CONNECT도 완전한 차단은 아니다. (1) 이미 열려 있는 정상 연결에 얹혀 데이터를 빼가는 경우, (2) 허용된 포트/프로토콜(예: DNS) 위로 데이터를 숨기는 터널링, (3) 네트워크가 아예 필요 없는 로컬 전용 공격은 이 메커니즘으로 포착되지 않는다. 또한 `bpf_send_signal`은 비동기적이므로 `connect()` 진입 시점에 신호를 보내도 완전한 사전 차단을 수학적으로 보장하지는 않는다 — 이 한계를 해소하기 위해 `security_socket_connect`/`security_bprm_check_security` LSM 훅 기반의 동기적 사전 차단을 별도 컴포넌트로 구현하였다(3.5절). 다만 `CONFIG_BPF_LSM` 및 활성 LSM 스택에 "bpf" 포함이 필요해 배포 환경 의존성이 있으므로, 본 절의 SHADOW_EXEC/SHADOW_CONNECT는 그러한 의존성 없이 어디서나 동작하는 기본 방어선으로 계속 유지한다.
+
+### 3.5 (실험적) LSM 훅 기반 동기적 사전 차단
+
+SHADOW_EXEC/SHADOW_CONNECT는 모두 "행위가 발생한 뒤 `bpf_send_signal(9)`로 프로세스를 죽이는" 방식이다. `bpf_send_signal`은 비동기 전달이므로, 신호가 실제로 전달되기 전에 `connect()`가 이미 진행되었거나 `execve()`가 이미 완료되었을 여지를 이론적으로 완전히 배제하지 못한다. 이를 근본적으로 해소하려면 시스템 콜의 반환값 자체를 커널이 원래 진행을 이어가기 전에 대체해야 한다.
+
+`BPF_PROG_TYPE_LSM` 프로그램은 커널의 LSM 훅 지점(`security_bprm_check_security`, `security_socket_connect` 등)에 fmod_ret 트램폴린 방식으로 부착되어, 원래 함수가 반환하기 전에 그 반환값 자체를 대체할 수 있다. 이를 이용해 별도 컴포넌트(`src/kshield_vpatch_lsm.bpf.c`, `src/kshield_vpatch_lsm.c`)를 구현하였다.
+
+- `security_bprm_check_security` 훅에서 AI 워커 계보가 `suspicious_bins[]`를 실행하려 하면 `-EPERM`을 반환하여 `execve()` 자체를 실패시킨다 — 의심 바이너리는 단 한 명령어도 실행되지 않는다.
+- `security_socket_connect` 훅에서 AI 워커 계보가 신뢰되지 않은 목적지로 `connect()`를 시도하면 `-EPERM`을 반환하여 연결 자체를 실패시킨다 — 3-way handshake조차 시작되지 않는다.
+
+두 훅 모두 커널 호출 경로상 SHADOW_EXEC/SHADOW_CONNECT가 관측하는 지점(`sched_process_exec` tracepoint, `tcp_v4_connect`/`tcp_v6_connect`)보다 앞서 실행되므로, 이 LSM 컴포넌트가 성공적으로 attach된 환경에서는 대부분의 시도가 SHADOW_EXEC/SHADOW_CONNECT까지 도달하기 전에 이미 차단된다. 두 컴포넌트를 동시에 로드해도 서로 간섭하지 않으며, LSM attach가 불가능한 환경(아래 참고)에서는 SHADOW_EXEC/SHADOW_CONNECT가 계속 방어선 역할을 한다.
+
+`BPF_PROG_TYPE_LSM`은 `CONFIG_BPF_LSM=y` 커널과, 활성 LSM 목록(`/sys/kernel/security/lsm`)에 `"bpf"` 포함을 요구한다. 이는 배포판·배포 설정에 따라 기본값이 다르며, 포함되어 있지 않다면 부팅 파라미터에 `lsm=...,bpf`를 추가하고 재부팅해야 한다 — 이는 보안 설정 변경이므로 운영자가 직접 판단·수행해야 할 사항이다. 이 요구사항이 SHADOW_EXEC/SHADOW_CONNECT(3.3절)에는 없다는 점이, 본 논문이 두 계층을 모두 유지하는 이유다.
+
+> **검증 상태**: 이 컴포넌트는 코드 작성만 완료되었으며, 4장의 실험 결과에는 포함되어 있지 않다. VM에서의 빌드·attach 성공 여부, 실제 `execve()`/`connect()` 사전 차단 동작, SIGKILL 방식(3.3절) 대비 오탐·성능 특성 비교는 아직 실측하지 못하였다(5장 향후 연구 참고).
 
 ### 3.4 공격 재현 환경
 
@@ -231,7 +250,7 @@ VM 실측 결과, python3(워커)→sh→curl로 이어지는 2단계 공격 체
 향후 연구 과제는 다음과 같다.
 - **다른 CVE로의 일반화**: 현재는 ShadowRay 한 사례에 특화되어 있다. Triton, TorchServe, MLflow 등 다른 프레임워크의 알려진 CVE에 대해서도 유사한 방식의 룰을 구축하고 공통 프레임워크로 일반화할 필요가 있다.
 - **런타임 룰 설정 지원**: `watched_parents[]`, `suspicious_bins[]`, `trusted_dst_ipv4[]`가 컴파일 타임에 고정되어 있어, 새로운 CVE 대응이나 신뢰 목적지 추가 시마다 재컴파일이 필요하다. BPF map 기반 런타임 룰 갱신 메커니즘 도입이 필요하다.
-- **security_socket_connect LSM 훅 기반 사전 차단**: 현재 SHADOW_CONNECT는 `tcp_v4_connect`/`tcp_v6_connect` kprobe와 비동기적 `bpf_send_signal`에 의존하여 완전한 사전 차단을 보장하지 못한다. `CONFIG_BPF_LSM` 지원 커널에서 `security_socket_connect` LSM 훅을 이용해 연결 자체를 동기적으로 거부(`-EPERM`)하는 방식으로 전환하면 더 강력한 보장이 가능하다.
+- **LSM 기반 사전 차단의 VM 실측 검증**: `security_bprm_check_security`/`security_socket_connect` LSM 훅을 이용한 동기적 사전 차단을 별도 컴포넌트(`kshield_vpatch_lsm.*`, 3.5절)로 구현하였으나, 아직 VM에서 빌드·attach·기능 검증을 거치지 않았다. `CONFIG_BPF_LSM` 및 `lsm=...,bpf` 부팅 설정 여부에 따른 attach 성공률, 실제 사전 차단 동작 여부, SIGKILL 방식(3.3절) 대비 오탐·성능 특성 비교가 필요하다.
 - **SHADOW_CONNECT의 성능 오버헤드 정량화**: 현재 성능 측정은 SHADOW_EXEC 단독 기준이다. 시스템 전역 아웃바운드 연결마다 실행되는 SHADOW_CONNECT의 오버헤드를 네트워크 집약적 워크로드에서 별도로 측정해야 한다.
 - **IPv6 신뢰 목적지 목록 지원**: 현재 IPv6는 loopback(`::1`) 외 모든 목적지를 의심으로 간주하며, IPv4의 `trusted_dst_ipv4[]`에 대응하는 신뢰 목록이 없다.
 - **DNS 터널링 등 잔여 우회 대응**: 허용된 프로토콜(DNS 등) 위로 데이터를 은닉하는 터널링, 기존 정상 연결에 얹혀가는 방식 등 SHADOW_CONNECT로도 막지 못하는 우회에 대한 추가 탐지 계층 연구가 필요하다.
