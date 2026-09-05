@@ -5,7 +5,7 @@
 lsh66404865@gmail.com
 
 > **작성 상태 안내**: 1~4장(서론, 관련 연구, 설계, 실험)이 VM 실측을 거쳐
-> 완성되었다. 참고문헌의 서지정보 정식 확인만 남아있다.
+> 완성되었고, 참고문헌은 웹 검색으로 실제 URL·발행일자를 확인하여 정리하였다.
 
 ---
 
@@ -21,9 +21,9 @@ AI 서빙 프레임워크(Ray, vLLM, Triton 등)에서 발견되는 원격 코�
 
 AI 서빙 프레임워크(Ray, vLLM, Triton Inference Server, MLflow 등)는 대규모 LLM 추론 파이프라인의 핵심 인프라로 자리잡았다. 그러나 이러한 프레임워크들은 빠른 기능 개발 속도에 비해 보안 검토가 상대적으로 미흡한 경우가 많으며, 실제로 원격 코드 실행급 심각한 취약점이 지속적으로 보고되고 있다.
 
-가장 널리 알려진 사례는 Ray의 Jobs Submission API에 존재하는 CVE-2023-48022("ShadowRay")이다. Ray 대시보드의 기본 포트(8265)로 노출되는 이 API는 기본 설정에서 별도의 인증을 요구하지 않아, 네트워크로 접근 가능한 누구나 임의의 코드를 클러스터의 워커 프로세스 권한으로 실행시킬 수 있다. 보안 업체 Oligo Security의 조사에 따르면, 이 취약점을 통해 실제로 수천 대의 Ray 클러스터가 침해되어 암호화폐 채굴, 역방향 셸 연결, 클러스터 내 크레덴셜 탈취 등에 악용된 사례가 확인되었다. 더 심각한 문제는 벤더(Anyscale)가 이를 "의도된 설계(설정 책임은 운영자에게 있음)"라는 입장을 오래 유지하며 공식 패치를 제공하지 않았다는 점이다. 이는 전통적인 "벤더 패치를 기다린다"는 대응 전략이 통하지 않는 상황을 만든다.
+가장 널리 알려진 사례는 Ray의 Jobs Submission API에 존재하는 CVE-2023-48022("ShadowRay")이다. Ray 대시보드의 기본 포트(8265)로 노출되는 이 API는 기본 설정에서 별도의 인증을 요구하지 않아, 네트워크로 접근 가능한 누구나 임의의 코드를 클러스터의 워커 프로세스 권한으로 실행시킬 수 있다. 보안 업체 Oligo Security의 조사에 따르면 [1], 이 취약점을 통해 실제로 수천 대의 Ray 클러스터가 침해되어 암호화폐 채굴, 역방향 셸 연결, 클러스터 내 크레덴셜 탈취 등에 악용된 사례가 확인되었다. 더 심각한 문제는 벤더(Anyscale)가 이를 "설계상 의도된 동작(Ray는 신뢰된 네트워크 내에서만 배포되어야 한다는 문서상의 전제)"이라는 입장을 오래 유지하며 즉각적인 공식 패치를 제공하지 않았다는 점이다 [2]. 이는 전통적인 "벤더 패치를 기다린다"는 대응 전략이 통하지 않는 상황을 만든다.
 
-이러한 상황에서 방어자가 취할 수 있는 현실적인 선택지는 제한적이다. 프레임워크 자체를 수정하는 것은 벤더의 협조 없이는 어렵고, 프레임워크 업그레이드는 프로덕션 환경의 호환성 리스크 때문에 신중하게 이루어져야 한다. 웹 애플리케이션 보안 분야에서는 이런 상황에 대응하기 위해 WAF(Web Application Firewall) 수준에서 "가상 패치(virtual patching)"라는 개념이 오래전부터 활용되어 왔다 — 취약점 자체를 고치지 못하는 동안, 그 취약점이 악용될 때 나타나는 특정 패턴만 탐지하여 임시로 차단하는 기법이다.
+이러한 상황에서 방어자가 취할 수 있는 현실적인 선택지는 제한적이다. 프레임워크 자체를 수정하는 것은 벤더의 협조 없이는 어렵고, 프레임워크 업그레이드는 프로덕션 환경의 호환성 리스크 때문에 신중하게 이루어져야 한다. 웹 애플리케이션 보안 분야에서는 이런 상황에 대응하기 위해 WAF(Web Application Firewall) 수준에서 "가상 패치(virtual patching)"라는 개념이 오래전부터 활용되어 왔다 [7] — 취약점 자체를 고치지 못하는 동안, 그 취약점이 악용될 때 나타나는 특정 패턴만 탐지하여 임시로 차단하는 기법이다.
 
 본 논문은 이 개념을 AI 서빙 프레임워크의 커널 수준으로 확장한다. eBPF를 이용하면 애플리케이션 코드를 한 줄도 수정하지 않고, 재시작도 없이, 실행 중인 프로세스에 탐지 로직을 "붙였다 뗄 수 있다." 이는 정식 패치가 배포되기 전까지의 공백을 메우는 임시 방어선이자, 정식 패치가 나온 뒤에는 훅을 제거하기만 하면 되는 저비용 대응 수단이 된다.
 
@@ -38,7 +38,7 @@ AI 서빙 프레임워크(Ray, vLLM, Triton Inference Server, MLflow 등)는 대
 
 ### 2.1 AI 서빙 프레임워크의 보안 취약점
 
-Ray의 ShadowRay(CVE-2023-48022) 외에도, TorchServe, Triton Inference Server, MLflow 등 주요 AI 서빙 프레임워크에서 경로 탐색(path traversal), 역직렬화(deserialization) 기반 원격 코드 실행 등의 취약점이 다수 보고되었다. 이들 프레임워크는 공통적으로 (1) 빠른 기능 릴리스 주기로 인해 보안 검토가 상대적으로 후순위로 밀리고, (2) 조직 내부적으로 버전 업그레이드가 프로덕션 안정성 문제로 지연되는 경향을 보인다.
+Ray의 ShadowRay(CVE-2023-48022 [3][4]) 외에도, TorchServe, Triton Inference Server, MLflow 등 주요 AI 서빙 프레임워크에서 경로 탐색(path traversal), 역직렬화(deserialization) 기반 원격 코드 실행 등의 취약점이 다수 보고되었다. 이들 프레임워크는 공통적으로 (1) 빠른 기능 릴리스 주기로 인해 보안 검토가 상대적으로 후순위로 밀리고, (2) 조직 내부적으로 버전 업그레이드가 프로덕션 안정성 문제로 지연되는 경향을 보인다.
 
 ### 2.2 가상 패치(Virtual Patching)
 
@@ -46,11 +46,11 @@ Ray의 ShadowRay(CVE-2023-48022) 외에도, TorchServe, Triton Inference Server,
 
 ### 2.3 eBPF 기반 런타임 보안 및 가상 패치 메커니즘
 
-Falco, Tetragon 등 eBPF 기반 런타임 보안 도구는 커스텀 룰을 통해 특정 시스템 콜 패턴을 탐지·차단하는 기능을 이미 범용적으로 제공한다. 즉, "eBPF로 특정 행위 패턴을 감시해서 막는다"는 메커니즘 자체는 새로운 것이 아니다. 그러나 이들 도구의 기본 룰셋은 범용 워크로드를 대상으로 하며, AI 서빙 프레임워크에 특화된 취약점(예: ShadowRay의 구체적인 악용 시 발생하는 프로세스 트리 패턴)에 대한 룰은 아직 정립되어 있지 않다. 본 논문의 기여는 새로운 탐지 메커니즘의 발명이 아니라, 기존 eBPF 런타임 보안 기법을 AI 서빙 프레임워크라는 특정 도메인에 적용하고 실제 CVE로 그 효과를 검증하는 데 있다.
+Falco [5], Tetragon [6] 등 eBPF 기반 런타임 보안 도구는 커스텀 룰을 통해 특정 시스템 콜 패턴을 탐지·차단하는 기능을 이미 범용적으로 제공한다. 즉, "eBPF로 특정 행위 패턴을 감시해서 막는다"는 메커니즘 자체는 새로운 것이 아니다. 그러나 이들 도구의 기본 룰셋은 범용 워크로드를 대상으로 하며, AI 서빙 프레임워크에 특화된 취약점(예: ShadowRay의 구체적인 악용 시 발생하는 프로세스 트리 패턴)에 대한 룰은 아직 정립되어 있지 않다. 본 논문의 기여는 새로운 탐지 메커니즘의 발명이 아니라, 기존 eBPF 런타임 보안 기법을 AI 서빙 프레임워크라는 특정 도메인에 적용하고 실제 CVE로 그 효과를 검증하는 데 있다.
 
 ### 2.4 kShield(모델 파일 보안)와의 관계
 
-본 연구는 저자의 선행 연구인 kShield [모델 파일 보안 프레임워크, 별도 저장소]와 같은 eBPF kprobe/tracepoint 기반 아키텍처(커널 공간 BPF 프로그램 + perf buffer + 사용자 공간 데몬 + `bpf_send_signal`을 통한 즉시 프로세스 종료)를 공유한다. 다만 탐지 대상과 원리가 다르다. kShield는 보안 파일에 대한 접근 **빈도**(임계값 초과)를 탐지 기준으로 삼는 반면, 본 연구는 정상적으로는 절대 발생하지 않을 **단일 행위**(비정상 프로세스 실행)의 발생 여부를 탐지 기준으로 삼는다. 이는 공격자가 파일을 여러 번 나누어 여는 대신 한 번의 `open()`+`read()`로 데이터를 통째로 탈취하는 경우에도 탐지가 가능하다는 구조적 이점을 가진다.
+본 연구는 저자의 선행 연구인 kShield(모델 파일 보안 프레임워크) [8]와 같은 eBPF kprobe/tracepoint 기반 아키텍처(커널 공간 BPF 프로그램 + perf buffer + 사용자 공간 데몬 + `bpf_send_signal`을 통한 즉시 프로세스 종료)를 공유한다. 다만 탐지 대상과 원리가 다르다. kShield는 보안 파일에 대한 접근 **빈도**(임계값 초과)를 탐지 기준으로 삼는 반면, 본 연구는 정상적으로는 절대 발생하지 않을 **단일 행위**(비정상 프로세스 실행)의 발생 여부를 탐지 기준으로 삼는다. 이는 공격자가 파일을 여러 번 나누어 여는 대신 한 번의 `open()`+`read()`로 데이터를 통째로 탈취하는 경우에도 탐지가 가능하다는 구조적 이점을 가진다.
 
 ---
 
@@ -58,9 +58,9 @@ Falco, Tetragon 등 eBPF 기반 런타임 보안 도구는 커스텀 룰을 통�
 
 ### 3.1 위협 모델
 
-본 논문이 상정하는 위협 모델은 다음과 같다. 공격자는 AI 서빙 프레임워크의 관리 API(예: Ray Jobs Submission API, 기본 포트 8265)에 네트워크로 접근 가능하며, 해당 API에 인증 메커니즘이 부재하거나 미흡하게 설정된 취약점(CVE-2023-48022)을 악용하여 임의의 코드를 원격에서 실행시킬 수 있다.
+본 논문이 상정하는 위협 모델은 다음과 같다. 공격자는 AI 서빙 프레임워크의 관리 API(예: Ray Jobs Submission API, 기본 포트 8265)에 네트워크로 접근 가능하며, 해당 API에 인증 메커니즘이 부재하거나 미흡하게 설정된 취약점(CVE-2023-48022 [3][4])을 악용하여 임의의 코드를 원격에서 실행시킬 수 있다.
 
-이 취약점은 벤더가 "의도된 설계"라는 입장을 고수하며 공식 패치를 제공하지 않거나, 조직 내부적으로 프레임워크 업그레이드에 따른 프로덕션 호환성 리스크 때문에 패치 적용이 장기간 지연되는 상황을 전제로 한다. 실제로 Oligo Security의 조사에 따르면 수천 대의 Ray 클러스터가 이 취약점을 통해 실제로 침해되어 암호화폐 채굴, 역방향 셸 연결, 클러스터 내 자격 증명 탈취 등에 악용된 사례가 확인되었다.
+이 취약점은 벤더가 "의도된 설계"라는 입장을 고수하며 즉각적인 공식 패치를 제공하지 않거나 [2], 조직 내부적으로 프레임워크 업그레이드에 따른 프로덕션 호환성 리스크 때문에 패치 적용이 장기간 지연되는 상황을 전제로 한다. 실제로 Oligo Security의 조사에 따르면 [1] 수천 대의 Ray 클러스터가 이 취약점을 통해 실제로 침해되어 암호화폐 채굴, 역방향 셸 연결, 클러스터 내 자격 증명 탈취 등에 악용된 사례가 확인되었다.
 
 공격자의 궁극적 목표는 원격 코드 실행을 통해 정상적인 AI 워커 프로세스의 권한으로 비정상적인 하위 프로세스를 실행하거나(예: `/bin/sh`, `curl`), 공격자가 제어하는 외부 서버로 아웃바운드 연결을 수립하여 2차 피해(암호화폐 채굴, 데이터 유출, 크레덴셜 탈취)를 유발하는 것이다.
 
@@ -68,7 +68,7 @@ Falco, Tetragon 등 eBPF 기반 런타임 보안 도구는 커스텀 룰을 통�
 
 ### 3.2 시스템 아키텍처
 
-kShield-VirtualPatch는 저자의 선행 연구 kShield와 동일한 아키텍처 패턴(커널 공간 BPF 프로그램 + perf buffer + 사용자 공간 로거)을 따른다.
+kShield-VirtualPatch는 저자의 선행 연구 kShield [8]와 동일한 아키텍처 패턴(커널 공간 BPF 프로그램 + perf buffer + 사용자 공간 로거)을 따른다.
 
 ```
 ┌─────────────────────────────────────────────┐
@@ -114,7 +114,7 @@ kShield-VirtualPatch는 저자의 선행 연구 kShield와 동일한 아키텍�
 
 이 메커니즘은 kShield의 EVIL_OPEN(반복 횟수 기반)과 근본적으로 다른 원리로 동작한다. AI 워커 계보에서 curl/wget 등이 실행되는 행위는 정상 운영 중에는 **단 한 번도 발생해서는 안 되는** 행위이므로, 반복 횟수와 무관하게 첫 발생 시점에 즉시 탐지·차단할 수 있다.
 
-`watched_parents[]`와 `suspicious_bins[]`는 BPF rodata 섹션에 컴파일 타임에 삽입되며, 이는 kShield와 동일하게 대상 경로 변경 시 재컴파일이 필요하다는 한계를 가진다(향후 연구 참고).
+`watched_parents[]`와 `suspicious_bins[]`는 BPF rodata 섹션에 컴파일 타임에 삽입되며, 이는 kShield [8]와 동일하게 대상 경로 변경 시 재컴파일이 필요하다는 한계를 가진다(향후 연구 참고). 전체 구현 코드는 공개 저장소 [9]에서 확인할 수 있다.
 
 ### 3.4 공격 재현 환경
 
@@ -188,7 +188,7 @@ kShield-VirtualPatch 활성화로 인한 처리량·지연시간 변화는 Welch
 
 ## 5. 결론 및 향후 연구
 
-본 논문은 AI 서빙 프레임워크의 알려진 RCE 취약점(ShadowRay)에 대해, 코드 수정이나 재배포 없이 eBPF로 가상 패치를 적용하는 방법을 제시하였다. `sched_process_fork`/`sched_process_exec` 트레이스포인트 기반의 SHADOW_EXEC 탐지는 반복 횟수가 아닌 단일 이상 행위 발생을 기준으로 하므로, 기존 kShield의 빈도 기반 탐지가 가진 구조적 한계(공격자가 한 번의 접근으로 데이터를 탈취하는 경우 탐지 불가)를 보완한다.
+본 논문은 AI 서빙 프레임워크의 알려진 RCE 취약점(ShadowRay)에 대해, 코드 수정이나 재배포 없이 eBPF로 가상 패치를 적용하는 방법을 제시하였다. `sched_process_fork`/`sched_process_exec` 트레이스포인트 기반의 SHADOW_EXEC 탐지는 반복 횟수가 아닌 단일 이상 행위 발생을 기준으로 하므로, 기존 kShield [8]의 빈도 기반 탐지가 가진 구조적 한계(공격자가 한 번의 접근으로 데이터를 탈취하는 경우 탐지 불가)를 보완한다.
 
 VM 실측 결과, python3(워커)→sh→curl로 이어지는 2단계 공격 체인을 curl 실행 시점에 정확히 차단하였으며, 정상 job은 오탐 없이 통과함을 확인하였다. 10회 반복 성능 측정 결과 kShield-VirtualPatch 활성화로 인한 통계적으로 유의미한 처리량·지연시간 저하는 관측되지 않았다(처리량 p=0.7322, 지연시간 p=0.6956, Welch's t-test). 특히 개발 과정에서 "직속 부모만 확인"하는 초기 설계가 다단계 공격 체인을 놓치고 정상 job도 오탐하는 문제를 실측으로 발견하고, 프로세스 계보(lineage) 추적 방식으로 재설계하여 해결한 경험은, 이 종류의 탐지 메커니즘 설계 시 실행 체인의 깊이를 반드시 고려해야 함을 보여준다.
 
@@ -199,17 +199,18 @@ VM 실측 결과, python3(워커)→sh→curl로 이어지는 2단계 공격 체
 - **오탐 시나리오 확장 검증**: 본 실험은 `echo`, `python3 -c` 등 단순 job으로만 오탐 여부를 확인하였다. AI 워커가 정상적으로 서브프로세스를 실행하는 더 복잡한 합법적 워크로드(예: 데이터 전처리 파이프라인, 다른 언어 런타임 호출)와의 충돌 가능성을 다양한 시나리오에서 검증해야 한다.
 - **탐지 반복성 및 정밀 지연시간 측정**: 공격 탐지는 단일 실행 기반 정성적 확인에 그쳤다. N회 반복 탐지율과 `bpf_ktime_get_ns()` 기반 정밀 SIGKILL 지연시간 측정이 필요하다.
 - **동등성 검정(TOST) 수행**: 성능 무영향을 통계적으로 엄밀히 증명하기 위해 TOST 기반 동등성 검정과 표본 크기 확대(N≥30)가 필요하다.
-- **Falco/Tetragon과의 정량적 비교**: 기존 범용 런타임 보안 도구에 동일한 룰을 이식했을 때와의 성능·정확도 비교가 필요하다.
+- **Falco/Tetragon과의 정량적 비교**: 기존 범용 런타임 보안 도구 [5][6]에 동일한 룰을 이식했을 때와의 성능·정확도 비교가 필요하다.
 
 ---
 
 ## 참고문헌
 
-`[TODO: 아래는 초안 목록이며 정확한 서지정보 확인 및 정식 인용 형식 정리가 필요하다]`
-
-[1] Oligo Security, "ShadowRay: First Known Attack Campaign Targeting AI Workloads Actively Exploited In The Wild," 2024.
-[2] Anyscale, "Ray Security," Ray 공식 문서.
-[3] MITRE, "CVE-2023-48022," National Vulnerability Database.
-[4] Falco, "Container Runtime Security," The Falco Authors, CNCF, 2024.
-[5] Isovalent, "Tetragon: eBPF-based Security Observability and Runtime Enforcement," GitHub, 2023.
-[6] OWASP, "Virtual Patching Best Practices," OWASP Foundation.
+[1] Oligo Security, "ShadowRay: First Known Attack Campaign Targeting AI Workloads Exploited In The Wild," Mar. 2024. [Online]. Available: https://www.oligo.security/blog/shadowray-attack-ai-workloads-actively-exploited-in-the-wild
+[2] Anyscale, "Update on Ray CVEs CVE-2023-6019, CVE-2023-6020, CVE-2023-6021, CVE-2023-48022, CVE-2023-48023," Anyscale Blog, 2024. [Online]. Available: https://www.anyscale.com/blog/update-on-ray-cves-cve-2023-6019-cve-2023-6020-cve-2023-6021-cve-2023-48022-cve-2023-48023
+[3] MITRE/NVD, "CVE-2023-48022," National Vulnerability Database, 2023. [Online]. Available: https://nvd.nist.gov/vuln/detail/CVE-2023-48022
+[4] GitHub Advisory Database, "Ray has arbitrary code execution via jobs submission API (GHSA-6wgj-66m2-xxp2)," 2023. [Online]. Available: https://github.com/advisories/GHSA-6wgj-66m2-xxp2
+[5] Falco, "Container Runtime Security," The Falco Authors, CNCF, 2024. [Online]. Available: https://falco.org
+[6] Isovalent, "Tetragon: eBPF-based Security Observability and Runtime Enforcement," GitHub, 2023. [Online]. Available: https://github.com/cilium/tetragon
+[7] OWASP Foundation, "Virtual Patching Best Practices," 2024. [Online]. Available: https://owasp.org/www-community/Virtual_Patching_Best_Practices
+[8] 이상헌, "kShield: eBPF 기반 AI 모델 보안 프레임워크 구현 코드," GitHub, 2026. [Online]. Available: https://github.com/sangheon-lee1028/Ai-ebpf
+[9] 이상헌, "kShield-VirtualPatch: eBPF 기반 AI 서빙 프레임워크 취약점 가상 패치 구현 코드," GitHub, 2026. [Online]. Available: https://github.com/sangheon-lee1028/kShield-VirtualPatch
