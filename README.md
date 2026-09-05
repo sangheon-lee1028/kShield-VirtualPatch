@@ -86,8 +86,9 @@ python3 attack/benchmark_vpatch.py --count 500 --output metrics_vpatch_on.csv
 ## 상태
 
 **v3(kprobe/tracepoint) + LSM 사전 차단 모두 기능·성능 검증 완료.** v4(curl/wget
-재분류)·v5(audit-only 모드)까지 VM에서 검증하였다. 상세 수치는
-`paper_draft.md` 4.4절·3.6절 참고.
+재분류)·v5(audit-only 모드)·v6(감시 대상 자신의 직접 행위 탐지)·v7(데몬
+재시작/최초 기동 시 계보 백필)까지 VM에서 검증하였다. 상세 수치는
+`paper_draft.md` 4.4절·3.6절·3.7절·3.8절 참고.
 
 VM 실측(Ubuntu, 실제 curl/bash 사용)으로 다음을 확인하였다.
 - 빌드: 컴파일·CO-RE 재배치·attach(v3: kprobe/tracepoint, LSM:
@@ -101,6 +102,12 @@ VM 실측(Ubuntu, 실제 curl/bash 사용)으로 다음을 확인하였다.
   통계적으로 유의미하지만 작은 차이(처리량 −0.67%, 지연시간 +0.7%) 관측
 - audit-only 모드: 탐지 로그는 남기되 실제 차단(SIGKILL/-EPERM)은 건너뛰는
   동작을 v3·LSM 양쪽에서 확인
+- v6: 감시 대상 프로세스 자신이 fork 없이 직접 execve()/connect()를
+  호출하는 경우(`watched_self[]`)를 v3·LSM 양쪽에서 확인, 무관한 프로세스는
+  영향 없음(회귀 확인)
+- v7: 데몬 기동 전부터 이미 떠 있던 2단계 손자뻘 프로세스 체인(예: raylet →
+  bash → curl)이 `/proc` 백필로 계보에 편입되어 v3·LSM 양쪽에서 정확히
+  탐지됨을 확인 — 직속 부모 검사만으로는 잡을 수 없는 경우
 
 `paper_draft.md`에 위 결과가 전부 반영되어 있다.
 
