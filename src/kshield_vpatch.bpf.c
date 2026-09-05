@@ -94,10 +94,19 @@ const volatile char watched_parents[MAX_WATCHED_PARENT][MAX_COMM_LEN] = {
  * /bin/sh, /bin/bash는 정상 job 실행에도 쓰이는 경로이므로 제외하고,
  * 실제 페이로드 다운로드/외부 연결에 쓰이는 도구만 포함한다.
  * SHADOW_CONNECT(아래)가 이 목록에 없는 경로도 커버하므로, 이 목록은
- * "알려진 바이너리를 더 일찍 잡기 위한" 보조 계층이다. */
+ * "알려진 바이너리를 더 일찍 잡기 위한" 보조 계층이다.
+ *
+ * /bin과 /usr/bin이 실제로는 같은 파일(심볼릭 링크)을 가리키는
+ * 배포판(Ubuntu 등)에서도 execve()에 넘어가는 경로 문자열 자체는
+ * 다르다. LSM 실험 컴포넌트(kshield_vpatch_lsm) 실측 중, 쉘의 $PATH
+ * 탐색이 /usr/bin/curl 거부 후 /bin/curl로 재시도해 이 블록리스트를
+ * 통과하는 사례가 실제로 발견되어, 각 바이너리의 /bin, /usr/bin 두
+ * 경로 모두 등록하도록 수정하였다. */
 const volatile char suspicious_bins[MAX_SUSPICIOUS_BIN][MAX_PATH_LEN] = {
     "/usr/bin/curl",
+    "/bin/curl",
     "/usr/bin/wget",
+    "/bin/wget",
     "/bin/nc",
     "/usr/bin/nc",
     "/usr/bin/ncat",

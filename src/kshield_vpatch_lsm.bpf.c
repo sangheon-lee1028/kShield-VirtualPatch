@@ -74,9 +74,17 @@ const volatile char watched_parents[MAX_WATCHED_PARENT][MAX_COMM_LEN] = {
     "python3",
 };
 
+/* /bin과 /usr/bin이 실제로는 같은 파일(심볼릭 링크)을 가리키는
+ * 배포판(Ubuntu 등)에서도, execve()에 넘어가는 경로 문자열 자체는
+ * 다르다. 쉘의 $PATH 탐색이 앞선 경로에서 거부당하면 뒤 경로로
+ * 재시도하는 경우가 있어(VM 실측으로 실제 확인됨: /usr/bin/curl 거부
+ * 후 /bin/curl로 재시도해 통과), 각 바이너리의 /bin, /usr/bin 두 경로
+ * 모두 등록해야 한다. */
 const volatile char suspicious_bins[MAX_SUSPICIOUS_BIN][MAX_PATH_LEN] = {
     "/usr/bin/curl",
+    "/bin/curl",
     "/usr/bin/wget",
+    "/bin/wget",
     "/bin/nc",
     "/usr/bin/nc",
     "/usr/bin/ncat",
@@ -196,16 +204,11 @@ int trace_lineage_exit(void *ctx)
 SEC("lsm/bprm_check_security")
 int BPF_PROG(kshield_lsm_bprm_check, struct linux_binprm *bprm, int ret)
 {
-    __u32 dbg_pid = bpf_get_current_pid_tgid() >> 32;
-    bpf_printk("bprm_check ENTER pid=%d prior_ret=%d\n", dbg_pid, ret);
-
     if (ret != 0)
         return ret;
 
     char parent_comm[MAX_COMM_LEN] = {};
-    int watched = current_is_watched(&parent_comm);
-    bpf_printk("bprm_check pid=%d watched=%d\n", dbg_pid, watched);
-    if (!watched)
+    if (!current_is_watched(&parent_comm))
         return 0;
 
     char filename[MAX_PATH_LEN] = {};
@@ -219,7 +222,6 @@ int BPF_PROG(kshield_lsm_bprm_check, struct linux_binprm *bprm, int ret)
             break;
         }
     }
-    bpf_printk("bprm_check pid=%d file=%s suspicious=%d\n", dbg_pid, filename, is_suspicious);
     if (!is_suspicious)
         return 0;
 
@@ -234,7 +236,6 @@ int BPF_PROG(kshield_lsm_bprm_check, struct linux_binprm *bprm, int ret)
     /* 동기적 차단: execve() 자체가 여기서 -EPERM으로 즉시 실패한다.
      * SIGKILL과 달리 "이미 실행된 뒤 죽이는" 것이 아니라 애초에 실행이
      * 시작되지 않는다. */
-    bpf_printk("bprm_check pid=%d RETURNING -EPERM now\n", dbg_pid);
     return -EPERM;
 }
 
