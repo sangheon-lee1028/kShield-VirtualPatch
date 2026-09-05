@@ -83,6 +83,7 @@ char LICENSE[] SEC("license") = "GPL";
 
 #define MAX_COMM_LEN        16
 #define MAX_WATCHED_PARENT   8
+#define MAX_WATCHED_SELF     8
 #define MAX_SUSPICIOUS_BIN   8
 #define MAX_PATH_LEN         64
 #define MAX_TRUSTED_IPS      8
@@ -94,11 +95,34 @@ char LICENSE[] SEC("license") = "GPL";
  * 실 배포 시 대상 프레임워크(Ray/vLLM/Triton 등)의 실제 워커 프로세스명으로
  * 교체한다. "python3"는 본 PoC의 mock 서버(python3 mock_ray_server.py)를
  * 감시하기 위해 포함되어 있으며, 실제 Ray 배포에서는 "raylet" 등으로
- * 좁혀야 오탐을 줄일 수 있다. */
+ * 좁혀야 오탐을 줄일 수 있다.
+ *
+ * 주의: 이 배열은 "이 이름을 가진 프로세스가 자식을 fork하면 그 자식을
+ * 계보에 편입시킨다"는 용도로만 쓰인다 — 아래 watched_self[]와 의도적으로
+ * 분리되어 있다 (v6 재검토 참고). */
 const volatile char watched_parents[MAX_WATCHED_PARENT][MAX_COMM_LEN] = {
     "raylet",
     "ray::IDLE",
     "python3",
+};
+
+/* v6: 감시 대상 프로세스 자신이 fork 없이 직접 execve()/connect()를
+ * 호출하는 경우를 잡기 위한 별도 목록. `current_is_watched()`는 원래
+ * "내 직속 부모의 이름이 watched_parents[]와 일치하는가"만 확인했는데,
+ * 이는 "자손"만 감시하고 감시 대상 프로세스 본인의 직접 행위는 절대
+ * 계보에 편입되지 않는 구조적 공백이 있었다 — 예: raylet 자신이 fork
+ * 없이 직접 소켓을 열어 통신하면 어느 훅도 이를 감지하지 못했다.
+ *
+ * watched_parents[]를 그대로 재사용하지 않고 별도 배열을 둔 이유:
+ * watched_parents[]에는 "python3"처럼 본 PoC 편의를 위한 매우 범용적인
+ * 이름이 포함되어 있는데, 이를 "자기 자신 감시"에도 그대로 쓰면 이
+ * 프로그램과 무관한 다른 python3 프로세스(공유 서버의 다른 사용자
+ * 스크립트 등)까지 AI 워커로 오인되어 오탐 대상이 될 위험이 있다.
+ * watched_self[]는 실제 Ray 워커 프로세스명(raylet, ray::IDLE)만
+ * 담아 그 위험을 배제한다. */
+const volatile char watched_self[MAX_WATCHED_SELF][MAX_COMM_LEN] = {
+    "raylet",
+    "ray::IDLE",
 };
 
 /* AI 워커 계보(자손 프로세스)가 실행했을 때만 의심스러운 바이너리.
@@ -194,10 +218,25 @@ static __always_inline int is_watched_comm(const char *comm)
     return 0;
 }
 
+static __always_inline int is_watched_self(const char *comm)
+{
+    for (int i = 0; i < MAX_WATCHED_SELF; i++) {
+        if (str_eq(comm, watched_self[i], MAX_COMM_LEN))
+            return 1;
+    }
+    return 0;
+}
+
 /* 현재 프로세스가 AI 워커 계보에 속하는지 확인.
  * lineage map에 없더라도 직속 부모가 watched_parents[]와 일치하면
  * (예: BPF 프로그램이 fork 이후·exec 이전에 로드된 경우 대비) 계보로
- * 간주한다. parent_comm_out에 직속 부모 comm을 채워 반환한다. */
+ * 간주한다. parent_comm_out에 직속 부모 comm을 채워 반환한다.
+ *
+ * v6: 위 두 조건 다 "자손"만 커버한다는 공백이 있었다 — 감시 대상
+ * 프로세스 자신(watched_self[])이 fork 없이 직접 execve()/connect()를
+ * 호출하면 어느 조건도 참이 되지 않아 놓치는 문제가 있었다. 세 번째
+ * 조건으로 "내 자신의 comm이 watched_self[]와 일치하는가"를 추가하여
+ * 이를 해소한다. */
 static __always_inline int current_is_watched(char (*parent_comm_out)[MAX_COMM_LEN])
 {
     __u32 pid = bpf_get_current_pid_tgid() >> 32;
@@ -211,7 +250,12 @@ static __always_inline int current_is_watched(char (*parent_comm_out)[MAX_COMM_L
      * 빈 채로 읽히는 버그가 실측으로 발견된 바 있다. */
     BPF_CORE_READ_STR_INTO(parent_comm_out, parent, comm);
 
-    return (in_lineage != NULL) || is_watched_comm(*parent_comm_out);
+    if (in_lineage != NULL || is_watched_comm(*parent_comm_out))
+        return 1;
+
+    char self_comm[MAX_COMM_LEN] = {};
+    bpf_get_current_comm(&self_comm, sizeof(self_comm));
+    return is_watched_self(self_comm);
 }
 
 /*

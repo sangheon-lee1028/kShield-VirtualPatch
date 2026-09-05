@@ -59,6 +59,7 @@ char LICENSE[] SEC("license") = "GPL";
 
 #define MAX_COMM_LEN        16
 #define MAX_WATCHED_PARENT   8
+#define MAX_WATCHED_SELF     8
 #define MAX_SUSPICIOUS_BIN   8
 #define MAX_PATH_LEN         64
 #define MAX_TRUSTED_IPS      8
@@ -69,11 +70,25 @@ char LICENSE[] SEC("license") = "GPL";
 /* kshield_vpatch.bpf.c와 동일한 감시 목록. 이 파일은 독립된 BPF
  * 오브젝트이므로 맵/설정을 공유하지 않고 자체 사본을 둔다 — 메인
  * 구현과 서로 영향을 주지 않고 단독으로도 빌드·테스트 가능해야
- * 하기 때문이다. */
+ * 하기 때문이다.
+ *
+ * 주의: "자식 계보 편입용"으로만 쓰인다 — 아래 watched_self[]와
+ * 의도적으로 분리되어 있다 (v6 재검토, kshield_vpatch.bpf.c 헤더 참고). */
 const volatile char watched_parents[MAX_WATCHED_PARENT][MAX_COMM_LEN] = {
     "raylet",
     "ray::IDLE",
     "python3",
+};
+
+/* v6: 감시 대상 프로세스 자신이 fork 없이 직접 execve()/connect()를
+ * 호출하는 경우("나 자신"이 raylet/ray::IDLE인 경우)를 잡기 위한 목록.
+ * watched_parents[]에는 "python3"처럼 PoC 편의를 위한 범용적인 이름이
+ * 있어 자기 자신 감시에 그대로 쓰면 무관한 다른 python3 프로세스까지
+ * 오탐 대상이 될 위험이 있으므로, 실제 Ray 워커 프로세스명만 별도로
+ * 담는다(상세 근거는 kshield_vpatch.bpf.c 헤더 참고). */
+const volatile char watched_self[MAX_WATCHED_SELF][MAX_COMM_LEN] = {
+    "raylet",
+    "ray::IDLE",
 };
 
 /* v4 재검토: curl/wget은 여기 포함하지 않는다(kshield_vpatch.bpf.c와
@@ -154,6 +169,18 @@ static __always_inline int is_watched_comm(const char *comm)
     return 0;
 }
 
+static __always_inline int is_watched_self(const char *comm)
+{
+    for (int i = 0; i < MAX_WATCHED_SELF; i++) {
+        if (str_eq(comm, watched_self[i], MAX_COMM_LEN))
+            return 1;
+    }
+    return 0;
+}
+
+/* v6: kshield_vpatch.bpf.c와 동일한 재검토 — "자손"만 계보에 편입되고
+ * 감시 대상 프로세스 자신의 직접 행위는 놓치는 공백을 자기 자신 comm
+ * 확인(watched_self[])으로 메운다. */
 static __always_inline int current_is_watched(char (*parent_comm_out)[MAX_COMM_LEN])
 {
     __u32 pid = bpf_get_current_pid_tgid() >> 32;
@@ -166,7 +193,12 @@ static __always_inline int current_is_watched(char (*parent_comm_out)[MAX_COMM_L
      * (kshield_vpatch.bpf.c에서 실측으로 발견된 버그와 동일한 함정). */
     BPF_CORE_READ_STR_INTO(parent_comm_out, parent, comm);
 
-    return (in_lineage != NULL) || is_watched_comm(*parent_comm_out);
+    if (in_lineage != NULL || is_watched_comm(*parent_comm_out))
+        return 1;
+
+    char self_comm[MAX_COMM_LEN] = {};
+    bpf_get_current_comm(&self_comm, sizeof(self_comm));
+    return is_watched_self(self_comm);
 }
 
 static __always_inline int is_loopback_or_trusted(__u32 addr_host_order)
