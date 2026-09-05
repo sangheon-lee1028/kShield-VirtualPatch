@@ -21,13 +21,18 @@
 #include <time.h>
 #include <string.h>
 #include <errno.h>
+#include <stdlib.h>
+#include <dirent.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <bpf/libbpf.h>
+#include <bpf/bpf.h>
 #include "kshield_vpatch.skel.h"
 
 #define MAX_COMM_LEN 16
 #define MAX_PATH_LEN 64
+#define MAX_WATCHED_PARENT 8
+#define MAX_WATCHED_SELF   8
 
 #define EVT_SHADOW_EXEC    1
 #define EVT_SHADOW_CONNECT 2
@@ -83,6 +88,159 @@ static int libbpf_print_fn(enum libbpf_print_level level, const char *fmt, va_li
     return vfprintf(stderr, fmt, args);
 }
 
+/*
+ * v7: 데몬이 이미 실행 중인 클러스터에 나중에 붙거나(최초 기동), 크래시나
+ * 업데이트로 재시작되면 ai_worker_lineage map은 빈 상태로 다시 시작한다.
+ * 이 map은 sched_process_fork 훅이 "새로 fork되는 순간"에만 채우므로,
+ * 데몬이 뜨기 전부터 이미 떠 있던 워커의 자손 프로세스는 자기 자신이
+ * 다시 fork하기 전까지 어느 훅에도 계보로 인식되지 않는다 — v6에서 고친
+ * "감시 대상 자신의 직접 행위" 공백과 같은 계열의 문제이며, 트리거가
+ * "재시작/최초 기동"이라는 점만 다르다.
+ *
+ * 커널 BPF 프로그램을 건드리지 않고(맵 스키마·훅 로직 불변) 유저스페이스
+ * 로더에서 /proc을 스캔해 이미 떠 있는 프로세스들의 계보를 동일한
+ * ai_worker_lineage map에 직접 채워 넣는다. 판정 기준(watched_parents[]/
+ * watched_self[])은 문자열을 여기 다시 옮겨 적지 않고 BPF 오브젝트의
+ * rodata(skel->rodata)에서 그대로 읽어와, 두 목록이 조용히 어긋나는
+ * 버그를 원천 차단한다.
+ */
+struct proc_info {
+    int pid;
+    int ppid;
+    char comm[MAX_COMM_LEN];
+};
+
+/* /proc/PID/stat의 comm 필드는 괄호로 감싸여 있고 그 안에 공백/괄호가
+ * 섞일 수 있으므로, 반드시 *마지막* ')' 뒤부터 나머지 필드를 파싱해야
+ * 한다. */
+static int read_proc_stat(int pid, char *comm_out, int *ppid_out)
+{
+    char path[64];
+    snprintf(path, sizeof(path), "/proc/%d/stat", pid);
+    FILE *f = fopen(path, "r");
+    if (!f)
+        return -1;
+
+    char buf[512];
+    size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+    fclose(f);
+    if (n == 0)
+        return -1;
+    buf[n] = '\0';
+
+    char *open_paren  = strchr(buf, '(');
+    char *close_paren = strrchr(buf, ')');
+    if (!open_paren || !close_paren || close_paren < open_paren)
+        return -1;
+
+    int comm_len = (int)(close_paren - open_paren - 1);
+    if (comm_len < 0)
+        comm_len = 0;
+    if (comm_len >= MAX_COMM_LEN)
+        comm_len = MAX_COMM_LEN - 1;
+    memcpy(comm_out, open_paren + 1, comm_len);
+    comm_out[comm_len] = '\0';
+
+    int ppid = 0;
+    if (sscanf(close_paren + 1, " %*c %d", &ppid) != 1)
+        return -1;
+    *ppid_out = ppid;
+    return 0;
+}
+
+#define MAX_BACKFILL_PROCS 65536
+#define MAX_ANCESTOR_DEPTH 64
+
+static void backfill_existing_lineage(int lineage_map_fd,
+                                       const char (*watched_parents)[MAX_COMM_LEN], int n_parents,
+                                       const char (*watched_self_list)[MAX_COMM_LEN], int n_self)
+{
+    struct proc_info *procs = calloc(MAX_BACKFILL_PROCS, sizeof(*procs));
+    if (!procs) {
+        fprintf(stderr, "[경고] 계보 백필용 메모리 할당 실패, 건너뜀\n");
+        return;
+    }
+
+    DIR *d = opendir("/proc");
+    if (!d) {
+        fprintf(stderr, "[경고] /proc 열기 실패: %s (계보 백필 건너뜀)\n", strerror(errno));
+        free(procs);
+        return;
+    }
+
+    int count = 0;
+    struct dirent *ent;
+    while (count < MAX_BACKFILL_PROCS && (ent = readdir(d)) != NULL) {
+        if (ent->d_name[0] < '0' || ent->d_name[0] > '9')
+            continue;
+        int pid = atoi(ent->d_name);
+        char comm[MAX_COMM_LEN] = {};
+        int ppid = 0;
+        if (read_proc_stat(pid, comm, &ppid) != 0)
+            continue; /* 스캔 도중 종료된 프로세스 등은 조용히 건너뜀 */
+        procs[count].pid = pid;
+        procs[count].ppid = ppid;
+        memcpy(procs[count].comm, comm, MAX_COMM_LEN);
+        count++;
+    }
+    closedir(d);
+
+    /* 프로세스 테이블 규모(단일 호스트 기준 수백~수천)에서는 조상 탐색을
+     * O(count)로 반복해도 문제없다 — 상시 훅이 아니라 데몬 기동 시 1회만
+     * 실행되는 경로다. */
+    int backfilled = 0;
+    for (int i = 0; i < count; i++) {
+        int is_lineage = 0;
+
+        for (int s = 0; s < n_self; s++) {
+            if (watched_self_list[s][0] != '\0' &&
+                strncmp(procs[i].comm, watched_self_list[s], MAX_COMM_LEN) == 0) {
+                is_lineage = 1;
+                break;
+            }
+        }
+
+        if (!is_lineage) {
+            int cur_pid = procs[i].ppid;
+            for (int depth = 0; depth < MAX_ANCESTOR_DEPTH && cur_pid > 1; depth++) {
+                int found_idx = -1;
+                for (int j = 0; j < count; j++) {
+                    if (procs[j].pid == cur_pid) { found_idx = j; break; }
+                }
+                if (found_idx < 0)
+                    break;
+
+                int matched = 0;
+                for (int p = 0; p < n_parents; p++) {
+                    if (watched_parents[p][0] != '\0' &&
+                        strncmp(procs[found_idx].comm, watched_parents[p], MAX_COMM_LEN) == 0) {
+                        matched = 1;
+                        break;
+                    }
+                }
+                if (matched) {
+                    is_lineage = 1;
+                    break;
+                }
+                cur_pid = procs[found_idx].ppid;
+            }
+        }
+
+        if (is_lineage) {
+            __u32 pid_key = (__u32)procs[i].pid;
+            __u8 flag = 1;
+            if (bpf_map_update_elem(lineage_map_fd, &pid_key, &flag, BPF_ANY) == 0)
+                backfilled++;
+        }
+    }
+
+    if (backfilled > 0)
+        printf("계보 백필: 데몬 기동 전부터 이미 실행 중이던 AI 워커 계보 프로세스 %d개를 편입함\n",
+               backfilled);
+
+    free(procs);
+}
+
 int main(int argc, char **argv)
 {
     struct kshield_vpatch_bpf *skel;
@@ -116,6 +274,10 @@ int main(int argc, char **argv)
         fprintf(stderr, "BPF 프로그램 attach 실패: %d\n", err);
         goto cleanup;
     }
+
+    backfill_existing_lineage(bpf_map__fd(skel->maps.ai_worker_lineage),
+                               skel->rodata->watched_parents, MAX_WATCHED_PARENT,
+                               skel->rodata->watched_self, MAX_WATCHED_SELF);
 
     pb = perf_buffer__new(bpf_map__fd(skel->maps.events), 16,
                            handle_event, handle_lost, NULL, NULL);
