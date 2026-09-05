@@ -59,8 +59,19 @@
  * 검증 완료(v2): VM 실측(Ubuntu, 실제 curl 사용)에서 정상 job(echo,
  * python3 -c ...)은 오탐 없이 통과하고, python3 -> sh -> curl 2단계
  * 공격 체인은 curl exec 시점에 정확히 SIGKILL로 차단됨을 확인하였다.
- * TODO(검증 필요, v3): SHADOW_CONNECT 및 lineage 정리 로직은 아직 VM
- * 실측 전이다.
+ *
+ * v4 재검토 (SHADOW_EXEC의 오탐 전제 자체를 재검토):
+ *   - v2/v3까지는 curl/wget 실행 자체를 목적지와 무관하게 즉시 이상
+ *     행위로 간주했다. 그러나 실제 AI 서빙 워크로드에서는 워커가 모델
+ *     가중치·데이터셋을 curl/wget으로 내려받는 것이 정상적인 운영이다
+ *     — 즉 "curl을 실행했는가"는 이상 행위의 신호가 아니고, "curl이
+ *     어디로 연결하는가"가 진짜 신호다.
+ *   - curl/wget을 suspicious_bins[]에서 제외하고 SHADOW_CONNECT에게
+ *     판단을 완전히 넘긴다. exec 시점에는 통과시키고, 실제 connect()
+ *     시도 시점에 목적지가 신뢰되지 않으면 그때 잡는다 — 새 메커니즘
+ *     없이 기존 defense-in-depth 구조(exec 계층/connect 계층)를 그대로
+ *     재활용한 것이다. nc/ncat은 AI 워커 계보에서 합법적 용도가 사실상
+ *     없어(리버스/바인드 셸 목적이 대부분) exec 즉시 차단을 유지한다.
  */
 #include "vmlinux.h"
 #include <bpf/bpf_helpers.h>
@@ -91,22 +102,30 @@ const volatile char watched_parents[MAX_WATCHED_PARENT][MAX_COMM_LEN] = {
 };
 
 /* AI 워커 계보(자손 프로세스)가 실행했을 때만 의심스러운 바이너리.
- * /bin/sh, /bin/bash는 정상 job 실행에도 쓰이는 경로이므로 제외하고,
- * 실제 페이로드 다운로드/외부 연결에 쓰이는 도구만 포함한다.
- * SHADOW_CONNECT(아래)가 이 목록에 없는 경로도 커버하므로, 이 목록은
- * "알려진 바이너리를 더 일찍 잡기 위한" 보조 계층이다.
+ * /bin/sh, /bin/bash는 정상 job 실행에도 쓰이는 경로이므로 제외한다.
+ *
+ * v4 재검토: curl/wget은 여기 포함하지 않는다. 실제 AI 서빙 워크로드에서
+ * 워커가 모델 가중치·데이터셋을 HuggingFace/S3/사내 레지스트리 등에서
+ * curl/wget으로 내려받는 것은 정상적인 운영 패턴이다 — "curl을 실행했다"
+ * 자체는 목적지와 무관하게 이상 행위가 아니므로, 실행 파일 이름만으로
+ * 즉시 SIGKILL하면 정당한 다운로드 job까지 오탐으로 죽인다. curl/wget의
+ * 실제 위험은 "어디로 연결하는가"에 있으므로, 이 판단은 목적지를 아는
+ * SHADOW_CONNECT(아래)에게 전적으로 맡긴다 — 신뢰 목적지(loopback,
+ * trusted_dst_ipv4[])로 가는 curl/wget은 exec도 connect도 통과하고,
+ * 신뢰 안 된 목적지로 가면 exec은 통과해도 connect 시점에 잡힌다.
+ *
+ * 반면 nc/ncat은 AI 워커 계보에서 합법적으로 실행될 이유가 사실상
+ * 없고(리버스/바인드 셸 용도가 대부분이며, 바인드 셸은 connect()를
+ * 직접 호출하지 않아 SHADOW_CONNECT만으로는 못 잡을 수 있다), 목적지와
+ * 무관하게 exec 시점 즉시 차단이 여전히 유효하다.
  *
  * /bin과 /usr/bin이 실제로는 같은 파일(심볼릭 링크)을 가리키는
  * 배포판(Ubuntu 등)에서도 execve()에 넘어가는 경로 문자열 자체는
  * 다르다. LSM 실험 컴포넌트(kshield_vpatch_lsm) 실측 중, 쉘의 $PATH
- * 탐색이 /usr/bin/curl 거부 후 /bin/curl로 재시도해 이 블록리스트를
- * 통과하는 사례가 실제로 발견되어, 각 바이너리의 /bin, /usr/bin 두
- * 경로 모두 등록하도록 수정하였다. */
+ * 탐색이 거부된 경로 대신 다른 경로 문자열로 재시도해 블록리스트를
+ * 통과하는 사례가 실제로 발견되어, /bin, /usr/bin 두 경로 모두
+ * 등록한다. */
 const volatile char suspicious_bins[MAX_SUSPICIOUS_BIN][MAX_PATH_LEN] = {
-    "/usr/bin/curl",
-    "/bin/curl",
-    "/usr/bin/wget",
-    "/bin/wget",
     "/bin/nc",
     "/usr/bin/nc",
     "/usr/bin/ncat",
@@ -119,6 +138,16 @@ const volatile char suspicious_bins[MAX_SUSPICIOUS_BIN][MAX_PATH_LEN] = {
  * 때문이다. */
 const volatile __u32 trusted_dst_ipv4[MAX_TRUSTED_IPS] = {};
 
+/* v5: audit-only(감사 전용) 모드. WAF 업계의 표준 관행 — 신규 룰은 먼저
+ * "감지만 하고 차단은 안 함"으로 배포해 오탐을 관찰한 뒤에야 실제 차단으로
+ * 전환한다 — 을 반영한다. 1(기본값)이면 기존과 동일하게 탐지 즉시
+ * SIGKILL하고, 0이면 이벤트만 perf buffer로 기록하고 SIGKILL은 건너뛴다.
+ * const가 아닌 일반 전역 변수(.data 섹션)로 선언하여, rodata 배열
+ * (watched_parents[] 등)과 달리 재컴파일 없이 유저스페이스 로더가 실행
+ * 시점에 값을 설정할 수 있다 — kshield_vpatch.c의
+ * skel->data->enforce_mode 참고. */
+volatile __u32 enforce_mode = 1;
+
 struct shadow_event {
     __u32 type;       /* EVT_SHADOW_EXEC 또는 EVT_SHADOW_CONNECT */
     __u32 pid;
@@ -128,6 +157,7 @@ struct shadow_event {
     char  filename[MAX_PATH_LEN]; /* EVT_SHADOW_EXEC에서만 사용 */
     __u32 dst_addr;   /* EVT_SHADOW_CONNECT에서만 사용, 호스트 바이트 순서 */
     __u16 dst_port;   /* EVT_SHADOW_CONNECT에서만 사용, 호스트 바이트 순서 */
+    __u32 enforced;   /* 1=실제 SIGKILL 전송함, 0=audit-only(로그만) */
 };
 
 struct {
@@ -253,12 +283,16 @@ int trace_shadow_exec(struct trace_event_raw_sched_process_exec *ctx)
     bpf_get_current_comm(&evt.comm, sizeof(evt.comm));
     __builtin_memcpy(evt.parent_comm, parent_comm, MAX_COMM_LEN);
     __builtin_memcpy(evt.filename, filename, MAX_PATH_LEN);
+    evt.enforced = enforce_mode;
 
     bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU, &evt, sizeof(evt));
 
     /* sched_process_exec은 새 프로세스 컨텍스트에서 발동하므로,
-     * bpf_send_signal(SIGKILL)은 방금 exec된 의심 프로세스 자신을 종료시킨다. */
-    bpf_send_signal(9);
+     * bpf_send_signal(SIGKILL)은 방금 exec된 의심 프로세스 자신을 종료시킨다.
+     * audit-only 모드(enforce_mode=0)에서는 로그만 남기고 실제로는
+     * 종료시키지 않는다. */
+    if (enforce_mode)
+        bpf_send_signal(9);
 
     return 0;
 }
@@ -309,14 +343,17 @@ int BPF_KPROBE(trace_shadow_connect_v4, struct sock *sk, struct sockaddr *uaddr,
     evt.dst_port = bpf_ntohs(dst_port_be);
     bpf_get_current_comm(&evt.comm, sizeof(evt.comm));
     __builtin_memcpy(evt.parent_comm, parent_comm, MAX_COMM_LEN);
+    evt.enforced = enforce_mode;
 
     bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU, &evt, sizeof(evt));
 
     /* 주의: bpf_send_signal은 비동기적이라 tcp_v4_connect 자신의 완료를
      * 즉시 막지는 못한다. 완전한 사전 차단이 필요하면 향후 연구에서
      * security_socket_connect LSM 훅으로 전환하여 non-zero 반환으로
-     * 연결 자체를 거부하는 방식을 검토한다. */
-    bpf_send_signal(9);
+     * 연결 자체를 거부하는 방식을 검토한다. audit-only 모드에서는
+     * 애초에 신호를 보내지 않는다. */
+    if (enforce_mode)
+        bpf_send_signal(9);
 
     return 0;
 }
@@ -358,9 +395,11 @@ int BPF_KPROBE(trace_shadow_connect_v6, struct sock *sk, struct sockaddr *uaddr,
     evt.dst_port = bpf_ntohs(dst_port_be);
     bpf_get_current_comm(&evt.comm, sizeof(evt.comm));
     __builtin_memcpy(evt.parent_comm, parent_comm, MAX_COMM_LEN);
+    evt.enforced = enforce_mode;
 
     bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU, &evt, sizeof(evt));
-    bpf_send_signal(9);
+    if (enforce_mode)
+        bpf_send_signal(9);
 
     return 0;
 }

@@ -34,8 +34,10 @@
  *     LSM 훅 attach에 실패하는 환경에서는 메인 구현이 계속 방어망
  *     역할을 한다.
  *
- * TODO(검증 필요): 이 파일은 아직 VM에서 빌드·attach·기능 검증 전이다.
- * 빌드/실행 전 반드시 아래를 확인한다.
+ * 검증 완료: VM 실측으로 빌드·attach(attach_type lsm_mac)·기능
+ * (execve()/connect() 사전 차단, 정상 job 오탐 없음)·성능 오버헤드까지
+ * 확인하였다(paper_draft.md 3.5절, 4.4절 참고). 빌드/실행 전 아래 커널
+ * 요구사항은 여전히 유효하다.
  *   1) zgrep 'CONFIG_BPF_LSM' /boot/config-$(uname -r)  ->  =y 여야 함
  *   2) cat /sys/kernel/security/lsm  ->  "bpf"가 포함되어야 함
  *      포함되어 있지 않다면, /etc/default/grub의 GRUB_CMDLINE_LINUX에
@@ -74,23 +76,38 @@ const volatile char watched_parents[MAX_WATCHED_PARENT][MAX_COMM_LEN] = {
     "python3",
 };
 
-/* /bin과 /usr/bin이 실제로는 같은 파일(심볼릭 링크)을 가리키는
+/* v4 재검토: curl/wget은 여기 포함하지 않는다(kshield_vpatch.bpf.c와
+ * 동일한 재검토 — 상세 근거는 그 파일 헤더 주석 참고). AI 워커가 모델
+ * 가중치·데이터셋을 curl/wget으로 내려받는 것은 정상 운영이므로, 실행
+ * 파일 이름만으로 exec 자체를 막으면 정당한 다운로드 job까지 오탐으로
+ * 막는다. curl/wget의 위험 판단은 목적지를 아는 socket_connect 훅에
+ * 전적으로 맡긴다 — exec은 통과시키고, 신뢰 안 된 목적지로 connect를
+ * 시도할 때 그 자리에서 막는다. nc/ncat은 AI 워커 계보에서 합법적
+ * 용도가 사실상 없어 exec 즉시 차단을 유지한다.
+ *
+ * /bin과 /usr/bin이 실제로는 같은 파일(심볼릭 링크)을 가리키는
  * 배포판(Ubuntu 등)에서도, execve()에 넘어가는 경로 문자열 자체는
  * 다르다. 쉘의 $PATH 탐색이 앞선 경로에서 거부당하면 뒤 경로로
  * 재시도하는 경우가 있어(VM 실측으로 실제 확인됨: /usr/bin/curl 거부
  * 후 /bin/curl로 재시도해 통과), 각 바이너리의 /bin, /usr/bin 두 경로
  * 모두 등록해야 한다. */
 const volatile char suspicious_bins[MAX_SUSPICIOUS_BIN][MAX_PATH_LEN] = {
-    "/usr/bin/curl",
-    "/bin/curl",
-    "/usr/bin/wget",
-    "/bin/wget",
     "/bin/nc",
     "/usr/bin/nc",
     "/usr/bin/ncat",
 };
 
 const volatile __u32 trusted_dst_ipv4[MAX_TRUSTED_IPS] = {};
+
+/* v5: audit-only(감사 전용) 모드. kshield_vpatch.bpf.c와 동일한 목적 —
+ * 신규 룰을 먼저 "탐지만 하고 차단은 안 함"으로 배포해 오탐을 관찰한 뒤
+ * 실제 차단(-EPERM)으로 전환할 수 있게 한다. 1(기본값)이면 기존과 동일하게
+ * -EPERM으로 execve()/connect()를 실패시키고, 0이면 이벤트만 기록하고
+ * 0을 반환해(허용) 원래 시스템 콜이 그대로 진행되게 둔다. const가 아닌
+ * 일반 전역 변수(.data 섹션)라 재컴파일 없이 유저스페이스 로더 실행
+ * 시점에 값을 설정할 수 있다 — kshield_vpatch_lsm.c의
+ * skel->data->enforce_mode 참고. */
+volatile __u32 enforce_mode = 1;
 
 struct shadow_event {
     __u32 type;       /* EVT_LSM_EXEC_BLOCK 또는 EVT_LSM_CONNECT_BLOCK */
@@ -101,6 +118,7 @@ struct shadow_event {
     char  filename[MAX_PATH_LEN];
     __u32 dst_addr;
     __u16 dst_port;
+    __u32 enforced;   /* 1=실제 -EPERM 반환함, 0=audit-only(로그만, 통과시킴) */
 };
 
 struct {
@@ -231,12 +249,14 @@ int BPF_PROG(kshield_lsm_bprm_check, struct linux_binprm *bprm, int ret)
     bpf_get_current_comm(&evt.comm, sizeof(evt.comm));
     __builtin_memcpy(evt.parent_comm, parent_comm, MAX_COMM_LEN);
     __builtin_memcpy(evt.filename, filename, MAX_PATH_LEN);
+    evt.enforced = enforce_mode;
     bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU, &evt, sizeof(evt));
 
     /* 동기적 차단: execve() 자체가 여기서 -EPERM으로 즉시 실패한다.
      * SIGKILL과 달리 "이미 실행된 뒤 죽이는" 것이 아니라 애초에 실행이
-     * 시작되지 않는다. */
-    return -EPERM;
+     * 시작되지 않는다. audit-only 모드(enforce_mode=0)에서는 0을
+     * 반환하여 원래 execve()가 그대로 진행되게 둔다. */
+    return enforce_mode ? -EPERM : 0;
 }
 
 /*
@@ -285,9 +305,12 @@ int BPF_PROG(kshield_lsm_socket_connect, struct socket *sock, struct sockaddr *a
         evt.dst_port = bpf_ntohs(dst_port_be);
         bpf_get_current_comm(&evt.comm, sizeof(evt.comm));
         __builtin_memcpy(evt.parent_comm, parent_comm, MAX_COMM_LEN);
+        evt.enforced = enforce_mode;
         bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU, &evt, sizeof(evt));
 
-        return -EPERM; /* 동기적 차단: connect()가 즉시 실패, 핸드셰이크 시작 안 함 */
+        /* 동기적 차단: connect()가 즉시 실패, 핸드셰이크 시작 안 함.
+         * audit-only 모드에서는 0을 반환해 연결을 그대로 허용한다. */
+        return enforce_mode ? -EPERM : 0;
     }
 
     if (family == 10 /* AF_INET6 */) {
@@ -316,9 +339,10 @@ int BPF_PROG(kshield_lsm_socket_connect, struct socket *sock, struct sockaddr *a
         evt.dst_port = bpf_ntohs(dst_port_be);
         bpf_get_current_comm(&evt.comm, sizeof(evt.comm));
         __builtin_memcpy(evt.parent_comm, parent_comm, MAX_COMM_LEN);
+        evt.enforced = enforce_mode;
         bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU, &evt, sizeof(evt));
 
-        return -EPERM;
+        return enforce_mode ? -EPERM : 0;
     }
 
     return 0;

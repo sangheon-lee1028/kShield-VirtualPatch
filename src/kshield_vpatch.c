@@ -10,8 +10,10 @@
  * 실제 프로세스 종료(SIGKILL)는 커널 측 BPF 프로그램에서 즉시 수행되며,
  * 이 사용자 공간 프로그램은 로깅/모니터링 역할만 담당한다.
  *
- * TODO(검증 필요): SHADOW_CONNECT 및 lineage 정리(sched_process_exit)는
- * 아직 VM 실측 전이다.
+ * --audit-only 플래그를 주면 탐지 이벤트는 그대로 로그로 남기되 실제
+ * SIGKILL은 보내지 않는다(BPF 쪽 enforce_mode 전역 변수를 0으로 설정).
+ * WAF 신규 룰을 먼저 감사(alert-only)로 배포해 오탐을 관찰한 뒤 차단으로
+ * 전환하는 업계 관행을 반영한 것으로, 재컴파일 없이 실행 시점에 설정된다.
  */
 #include <stdio.h>
 #include <signal.h>
@@ -39,6 +41,7 @@ struct shadow_event {
     char filename[MAX_PATH_LEN];
     unsigned int dst_addr;
     unsigned short dst_port;
+    unsigned int enforced;
 };
 
 static volatile sig_atomic_t exiting = 0;
@@ -55,15 +58,17 @@ static void handle_event(void *ctx, int cpu, void *data, __u32 data_sz)
     char ts[32];
     strftime(ts, sizeof(ts), "%H:%M:%S", localtime(&now));
 
+    const char *action = e->enforced ? "SIGKILL 전송" : "[AUDIT-ONLY] 차단 안 함(로그만)";
+
     if (e->type == EVT_SHADOW_EXEC) {
-        printf("[%s] SHADOW_EXEC 탐지! parent=%s(pid=%u) -> child=%s(pid=%u) exec=%s => SIGKILL 전송\n",
-               ts, e->parent_comm, e->ppid, e->comm, e->pid, e->filename);
+        printf("[%s] SHADOW_EXEC 탐지! parent=%s(pid=%u) -> child=%s(pid=%u) exec=%s => %s\n",
+               ts, e->parent_comm, e->ppid, e->comm, e->pid, e->filename, action);
     } else if (e->type == EVT_SHADOW_CONNECT) {
         struct in_addr addr = { .s_addr = htonl(e->dst_addr) };
         char ip_str[INET_ADDRSTRLEN];
         inet_ntop(AF_INET, &addr, ip_str, sizeof(ip_str));
-        printf("[%s] SHADOW_CONNECT 탐지! parent=%s -> proc=%s(pid=%u) dst=%s:%u => SIGKILL 전송\n",
-               ts, e->parent_comm, e->comm, e->pid, ip_str, e->dst_port);
+        printf("[%s] SHADOW_CONNECT 탐지! parent=%s -> proc=%s(pid=%u) dst=%s:%u => %s\n",
+               ts, e->parent_comm, e->comm, e->pid, ip_str, e->dst_port, action);
     }
     fflush(stdout);
 }
@@ -83,13 +88,27 @@ int main(int argc, char **argv)
     struct kshield_vpatch_bpf *skel;
     struct perf_buffer *pb = NULL;
     int err;
+    int audit_only = 0;
+
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--audit-only") == 0)
+            audit_only = 1;
+    }
 
     libbpf_set_print(libbpf_print_fn);
 
-    skel = kshield_vpatch_bpf__open_and_load();
+    skel = kshield_vpatch_bpf__open();
     if (!skel) {
-        fprintf(stderr, "BPF 스켈레톤 로드 실패\n");
+        fprintf(stderr, "BPF 스켈레톤 open 실패\n");
         return 1;
+    }
+
+    skel->data->enforce_mode = audit_only ? 0 : 1;
+
+    err = kshield_vpatch_bpf__load(skel);
+    if (err) {
+        fprintf(stderr, "BPF 스켈레톤 로드 실패: %d\n", err);
+        goto cleanup;
     }
 
     err = kshield_vpatch_bpf__attach(skel);
@@ -112,6 +131,7 @@ int main(int argc, char **argv)
     }
 
     printf("kShield-VirtualPatch 실행 중... (Ctrl+C로 종료)\n");
+    printf("모드: %s\n", audit_only ? "AUDIT-ONLY (탐지만, 차단 안 함)" : "ENFORCE (탐지 즉시 SIGKILL)");
     printf("감시 1: watched_parents[] 계보가 suspicious_bins[]를 실행하는지 (SHADOW_EXEC)\n");
     printf("감시 2: watched_parents[] 계보가 신뢰되지 않은 목적지로 connect()하는지 (SHADOW_CONNECT)\n\n");
 

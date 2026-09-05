@@ -9,7 +9,9 @@
  * 콜 반환값을 대체하는 방식으로 완료한 뒤이다(kshield_vpatch.c의
  * SIGKILL 방식과 달리, 이쪽은 "죽이기 전에 막기").
  *
- * TODO(검증 필요): 이 로더는 아직 VM에서 실행 검증 전이다.
+ * --audit-only 플래그를 주면 탐지 이벤트는 로그로 남기되 실제 -EPERM은
+ * 반환하지 않아 execve()/connect()가 정상 진행되게 둔다(BPF 쪽
+ * enforce_mode 전역 변수를 0으로 설정, 재컴파일 불필요).
  */
 #include <stdio.h>
 #include <signal.h>
@@ -37,6 +39,7 @@ struct shadow_event {
     char filename[MAX_PATH_LEN];
     unsigned int dst_addr;
     unsigned short dst_port;
+    unsigned int enforced;
 };
 
 static volatile sig_atomic_t exiting = 0;
@@ -88,14 +91,16 @@ static void handle_event(void *ctx, int cpu, void *data, __u32 data_sz)
     strftime(ts, sizeof(ts), "%H:%M:%S", localtime(&now));
 
     if (e->type == EVT_LSM_EXEC_BLOCK) {
-        printf("[%s] LSM_EXEC_BLOCK 사전차단! proc=%s(pid=%u) parent=%s exec=%s => execve() -EPERM\n",
-               ts, e->comm, e->pid, e->parent_comm, e->filename);
+        const char *action = e->enforced ? "execve() -EPERM" : "[AUDIT-ONLY] execve() 허용됨(로그만)";
+        printf("[%s] LSM_EXEC_BLOCK 탐지! proc=%s(pid=%u) parent=%s exec=%s => %s\n",
+               ts, e->comm, e->pid, e->parent_comm, e->filename, action);
     } else if (e->type == EVT_LSM_CONNECT_BLOCK) {
         struct in_addr addr = { .s_addr = htonl(e->dst_addr) };
         char ip_str[INET_ADDRSTRLEN];
         inet_ntop(AF_INET, &addr, ip_str, sizeof(ip_str));
-        printf("[%s] LSM_CONNECT_BLOCK 사전차단! proc=%s(pid=%u) parent=%s dst=%s:%u => connect() -EPERM\n",
-               ts, e->comm, e->pid, e->parent_comm, ip_str, e->dst_port);
+        const char *action = e->enforced ? "connect() -EPERM" : "[AUDIT-ONLY] connect() 허용됨(로그만)";
+        printf("[%s] LSM_CONNECT_BLOCK 탐지! proc=%s(pid=%u) parent=%s dst=%s:%u => %s\n",
+               ts, e->comm, e->pid, e->parent_comm, ip_str, e->dst_port, action);
     }
     fflush(stdout);
 }
@@ -115,18 +120,32 @@ int main(int argc, char **argv)
     struct kshield_vpatch_lsm_bpf *skel;
     struct perf_buffer *pb = NULL;
     int err;
+    int audit_only = 0;
+
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--audit-only") == 0)
+            audit_only = 1;
+    }
 
     libbpf_set_print(libbpf_print_fn);
 
     if (check_bpf_lsm_active() != 0)
         return 1;
 
-    skel = kshield_vpatch_lsm_bpf__open_and_load();
+    skel = kshield_vpatch_lsm_bpf__open();
     if (!skel) {
+        fprintf(stderr, "BPF 스켈레톤 open 실패: %s\n", strerror(errno));
+        return 1;
+    }
+
+    skel->data->enforce_mode = audit_only ? 0 : 1;
+
+    err = kshield_vpatch_lsm_bpf__load(skel);
+    if (err) {
         fprintf(stderr,
             "BPF 스켈레톤 로드 실패. CONFIG_BPF_LSM=y 커널인지,\n"
-            "sudo로 실행했는지 확인하세요: %s\n", strerror(errno));
-        return 1;
+            "sudo로 실행했는지 확인하세요: %d (%s)\n", err, strerror(-err));
+        goto cleanup;
     }
 
     err = kshield_vpatch_lsm_bpf__attach(skel);
@@ -152,6 +171,7 @@ int main(int argc, char **argv)
     }
 
     printf("kShield-VirtualPatch-LSM 실행 중... (Ctrl+C로 종료)\n");
+    printf("모드: %s\n", audit_only ? "AUDIT-ONLY (탐지만, -EPERM 반환 안 함)" : "ENFORCE (탐지 즉시 -EPERM)");
     printf("감시 1: watched_parents[] 계보의 execve()가 suspicious_bins[]이면 사전 차단 (bprm_check_security)\n");
     printf("감시 2: watched_parents[] 계보의 connect()가 신뢰되지 않은 목적지면 사전 차단 (socket_connect)\n");
     printf("메인 구현(kshield_vpatch, kprobe+SIGKILL)과 달리 시스템 콜 자체가 즉시 실패한다.\n\n");

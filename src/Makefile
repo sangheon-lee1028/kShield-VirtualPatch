@@ -9,10 +9,10 @@
 # 빌드 대상 두 가지:
 #   kshield_vpatch      메인 구현(v3). kprobe+tracepoint, 비동기 SIGKILL.
 #                        어디서나(추가 커널 설정 없이) attach 가능. 검증 완료.
-#   kshield_vpatch_lsm   LSM 훅 기반 실험 구현. security_bprm_check_security /
+#   kshield_vpatch_lsm   LSM 훅 기반 사전 차단 구현. security_bprm_check_security /
 #                        security_socket_connect에서 동기적으로 -EPERM 반환.
 #                        CONFIG_BPF_LSM=y 및 활성 LSM 목록에 "bpf" 필요.
-#                        TODO(검증 필요): 아직 VM 실측 전.
+#                        기능·성능 검증 완료(paper_draft.md 3.5절, 4.4절).
 
 CLANG ?= clang
 BPFTOOL ?= bpftool
