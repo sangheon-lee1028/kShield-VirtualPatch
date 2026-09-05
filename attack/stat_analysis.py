@@ -28,6 +28,11 @@ Welch's t-test로 통계적 유의성을 검증한다.
 측정할 수 있다.
     python3 stat_analysis.py measure --group off_unrelated --runs 10 \\
         --bench-script attack/benchmark_unrelated_connect.py --port 19999
+
+fork 집약적 워크로드 측정: --fork-heavy를 추가하면 benchmark_vpatch.py가
+job당 fork를 훨씬 많이 발생시키는 entrypoint를 사용한다(실제 Ray의
+빈번한 워커 프로세스 생성 패턴 재현, 4.4절 한계 3 대응).
+    python3 stat_analysis.py measure --group off_fork --runs 10 --fork-heavy
 """
 
 import argparse
@@ -111,12 +116,14 @@ def welch_ttest(a, b):
 
 
 # ── 벤치마크 1회 실행 ───────────────────────────────────────────────────────
-def run_once(host, port, count, out_path, bench_script=None):
+def run_once(host, port, count, out_path, bench_script=None, fork_heavy=False):
     cmd = [
         sys.executable, bench_script or BENCH_SCRIPT,
         "--host", host, "--port", str(port),
         "--count", str(count), "--output", out_path,
     ]
+    if fork_heavy:
+        cmd.append("--fork-heavy")
     subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL)
 
     stats = {}
@@ -143,7 +150,8 @@ def run_repeated(args):
         ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:19]
         out = os.path.join(RESULTS_DIR, f"stat_{args.group}_r{i+1}_{ts}.csv")
         print(f"  Run {i+1}/{args.runs} ...", end="  ", flush=True)
-        s = run_once(args.host, args.port, args.count, out, bench_script=args.bench_script)
+        s = run_once(args.host, args.port, args.count, out,
+                      bench_script=args.bench_script, fork_heavy=args.fork_heavy)
         thr = s.get("throughput_rps", float("nan"))
         lat = s.get("latency_mean_ms", float("nan"))
         throughputs.append(thr)
@@ -229,6 +237,8 @@ def main():
     m.add_argument("--bench-script", default=None,
                     help="사용할 벤치마크 스크립트 경로 (기본: benchmark_vpatch.py). "
                          "예: attack/benchmark_unrelated_connect.py (시스템 전역 오버헤드 측정용)")
+    m.add_argument("--fork-heavy", action="store_true",
+                    help="benchmark_vpatch.py에 --fork-heavy를 전달 (fork 집약적 entrypoint 사용)")
 
     c = sub.add_parser("compare", help="두 그룹 t-test 비교")
     c.add_argument("--compare", nargs=2, metavar=("A.csv", "B.csv"), required=True)

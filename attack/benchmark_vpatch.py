@@ -40,6 +40,18 @@ BENIGN_ENTRYPOINTS = [
     "python3 -c \"import time; time.sleep(0.01)\"",
 ]
 
+# fork 집약적 워크로드 재현용 entrypoint (4.4절 한계 3 대응).
+# 실제 Ray는 태스크마다 워커 프로세스를 빈번히 새로 생성하는 반면,
+# 위 BENIGN_ENTRYPOINTS는 job 하나당 fork 1~2단계에 그친다. 아래는
+# sh의 for 루프로 /bin/true를 반복 fork+exec하여, 동일한 job 처리
+# 파이프라인 안에서 sched_process_fork/sched_process_exit 훅이 훨씬
+# 빈번히 발동하는 상황을 만든다. suspicious_bins[]에는 없는 안전한
+# 바이너리만 사용한다.
+FORK_HEAVY_ENTRYPOINTS = [
+    "for i in $(seq 1 50); do /bin/true; done",
+    "for i in $(seq 1 50); do echo x > /dev/null; done",
+]
+
 
 def submit_job(url: str, entrypoint: str):
     payload = json.dumps({"entrypoint": entrypoint}).encode("utf-8")
@@ -65,9 +77,11 @@ def percentile(sorted_list, p):
     return sorted_list[idx]
 
 
-def run_benchmark(url: str, count: int, output_path: str) -> dict:
+def run_benchmark(url: str, count: int, output_path: str, fork_heavy: bool = False) -> dict:
+    entrypoints = FORK_HEAVY_ENTRYPOINTS if fork_heavy else BENIGN_ENTRYPOINTS
+
     print("=" * 65)
-    print("  kShield-VirtualPatch 성능 벤치마크")
+    print("  kShield-VirtualPatch 성능 벤치마크" + (" (fork 집약적)" if fork_heavy else ""))
     print("=" * 65)
     print(f"  대상 URL : {url}")
     print(f"  반복 횟수: {count} 회")
@@ -82,7 +96,7 @@ def run_benchmark(url: str, count: int, output_path: str) -> dict:
     wall_start = time.perf_counter()
 
     for i in range(count):
-        entrypoint = BENIGN_ENTRYPOINTS[i % len(BENIGN_ENTRYPOINTS)]
+        entrypoint = entrypoints[i % len(entrypoints)]
         lat, code = submit_job(url, entrypoint)
 
         latencies.append(lat)
@@ -145,10 +159,13 @@ def main():
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument("--count", type=int, default=DEFAULT_COUNT)
     parser.add_argument("--output", default=DEFAULT_OUTPUT)
+    parser.add_argument("--fork-heavy", action="store_true",
+                         help="fork 집약적 entrypoint 사용 (4.4절 한계 3 대응, 실제 Ray의 "
+                              "빈번한 워커 프로세스 생성 패턴 재현)")
     args = parser.parse_args()
 
     url = f"http://{args.host}:{args.port}/api/jobs/"
-    run_benchmark(url, args.count, args.output)
+    run_benchmark(url, args.count, args.output, fork_heavy=args.fork_heavy)
 
 
 if __name__ == "__main__":
