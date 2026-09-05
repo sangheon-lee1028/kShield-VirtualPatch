@@ -2,13 +2,16 @@
 /*
  * kshield_vpatch.c — 사용자 공간 로더
  *
- * kshield_vpatch.bpf.c가 탐지한 SHADOW_EXEC 이벤트(AI 워커 프로세스의
- * 비정상 자식 프로세스 실행)를 perf buffer로부터 수신하여 콘솔에 출력한다.
+ * kshield_vpatch.bpf.c가 탐지한 두 종류의 이벤트를 perf buffer로부터
+ * 수신하여 콘솔에 출력한다.
+ *   - SHADOW_EXEC: AI 워커 계보가 의심 바이너리(curl/wget/nc 등)를 실행
+ *   - SHADOW_CONNECT: AI 워커 계보가 신뢰되지 않은 목적지로 아웃바운드
+ *     연결을 시도 (바이너리 종류와 무관하게 포착)
  * 실제 프로세스 종료(SIGKILL)는 커널 측 BPF 프로그램에서 즉시 수행되며,
  * 이 사용자 공간 프로그램은 로깅/모니터링 역할만 담당한다.
  *
- * TODO(검증 필요): 실제 VM에서 kshield_vpatch.bpf.c와 함께 빌드·실행
- * 테스트가 필요하다.
+ * TODO(검증 필요): SHADOW_CONNECT 및 lineage 정리(sched_process_exit)는
+ * 아직 VM 실측 전이다.
  */
 #include <stdio.h>
 #include <signal.h>
@@ -16,18 +19,26 @@
 #include <time.h>
 #include <string.h>
 #include <errno.h>
+#include <arpa/inet.h>
+#include <netinet/in.h>
 #include <bpf/libbpf.h>
 #include "kshield_vpatch.skel.h"
 
 #define MAX_COMM_LEN 16
 #define MAX_PATH_LEN 64
 
-struct shadow_exec_event {
+#define EVT_SHADOW_EXEC    1
+#define EVT_SHADOW_CONNECT 2
+
+struct shadow_event {
+    unsigned int type;
     unsigned int pid;
     unsigned int ppid;
     char comm[MAX_COMM_LEN];
     char parent_comm[MAX_COMM_LEN];
     char filename[MAX_PATH_LEN];
+    unsigned int dst_addr;
+    unsigned short dst_port;
 };
 
 static volatile sig_atomic_t exiting = 0;
@@ -39,13 +50,21 @@ static void sig_handler(int signo)
 
 static void handle_event(void *ctx, int cpu, void *data, __u32 data_sz)
 {
-    struct shadow_exec_event *e = data;
+    struct shadow_event *e = data;
     time_t now = time(NULL);
     char ts[32];
     strftime(ts, sizeof(ts), "%H:%M:%S", localtime(&now));
 
-    printf("[%s] SHADOW_EXEC 탐지! parent=%s(pid=%u) -> child=%s(pid=%u) exec=%s => SIGKILL 전송\n",
-           ts, e->parent_comm, e->ppid, e->comm, e->pid, e->filename);
+    if (e->type == EVT_SHADOW_EXEC) {
+        printf("[%s] SHADOW_EXEC 탐지! parent=%s(pid=%u) -> child=%s(pid=%u) exec=%s => SIGKILL 전송\n",
+               ts, e->parent_comm, e->ppid, e->comm, e->pid, e->filename);
+    } else if (e->type == EVT_SHADOW_CONNECT) {
+        struct in_addr addr = { .s_addr = htonl(e->dst_addr) };
+        char ip_str[INET_ADDRSTRLEN];
+        inet_ntop(AF_INET, &addr, ip_str, sizeof(ip_str));
+        printf("[%s] SHADOW_CONNECT 탐지! parent=%s -> proc=%s(pid=%u) dst=%s:%u => SIGKILL 전송\n",
+               ts, e->parent_comm, e->comm, e->pid, ip_str, e->dst_port);
+    }
     fflush(stdout);
 }
 
@@ -93,7 +112,8 @@ int main(int argc, char **argv)
     }
 
     printf("kShield-VirtualPatch 실행 중... (Ctrl+C로 종료)\n");
-    printf("감시 대상: watched_parents[] 프로세스가 suspicious_bins[]를 실행하는지 감시\n\n");
+    printf("감시 1: watched_parents[] 계보가 suspicious_bins[]를 실행하는지 (SHADOW_EXEC)\n");
+    printf("감시 2: watched_parents[] 계보가 신뢰되지 않은 목적지로 connect()하는지 (SHADOW_CONNECT)\n\n");
 
     while (!exiting) {
         err = perf_buffer__poll(pb, 100);
