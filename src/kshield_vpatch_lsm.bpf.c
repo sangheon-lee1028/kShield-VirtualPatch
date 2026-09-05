@@ -196,11 +196,16 @@ int trace_lineage_exit(void *ctx)
 SEC("lsm/bprm_check_security")
 int BPF_PROG(kshield_lsm_bprm_check, struct linux_binprm *bprm, int ret)
 {
+    __u32 dbg_pid = bpf_get_current_pid_tgid() >> 32;
+    bpf_printk("bprm_check ENTER pid=%d prior_ret=%d\n", dbg_pid, ret);
+
     if (ret != 0)
         return ret;
 
     char parent_comm[MAX_COMM_LEN] = {};
-    if (!current_is_watched(&parent_comm))
+    int watched = current_is_watched(&parent_comm);
+    bpf_printk("bprm_check pid=%d watched=%d\n", dbg_pid, watched);
+    if (!watched)
         return 0;
 
     char filename[MAX_PATH_LEN] = {};
@@ -214,6 +219,7 @@ int BPF_PROG(kshield_lsm_bprm_check, struct linux_binprm *bprm, int ret)
             break;
         }
     }
+    bpf_printk("bprm_check pid=%d file=%s suspicious=%d\n", dbg_pid, filename, is_suspicious);
     if (!is_suspicious)
         return 0;
 
@@ -228,6 +234,7 @@ int BPF_PROG(kshield_lsm_bprm_check, struct linux_binprm *bprm, int ret)
     /* 동기적 차단: execve() 자체가 여기서 -EPERM으로 즉시 실패한다.
      * SIGKILL과 달리 "이미 실행된 뒤 죽이는" 것이 아니라 애초에 실행이
      * 시작되지 않는다. */
+    bpf_printk("bprm_check pid=%d RETURNING -EPERM now\n", dbg_pid);
     return -EPERM;
 }
 
