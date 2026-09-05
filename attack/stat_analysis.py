@@ -56,6 +56,19 @@ def _regularized_incomplete_beta(a, b, x, iterations=200):
         return 0.0
     if x >= 1:
         return 1.0
+
+    # 버그(제출 전 자체 검토로 발견, scipy 대조 검증): 아래 연속분수는
+    # x < (a+1)/(a+b+2) 구간에서만 빠르고 안정적으로 수렴한다는 것이
+    # 표준적으로 알려진 사실이다(Numerical Recipes, betai). 이 조건 없이
+    # x가 1에 가까운 영역(두 그룹의 t값이 0에 가까울 때, 즉 "차이가
+    # 거의 없다"는 판정이 나와야 할 바로 그 상황)에서 그대로 계산하면
+    # 수렴이 깨져 완전히 틀린 값을 낸다 — 예: t≈0.006, 자유도≈9인
+    # 케이스에서 scipy는 p=0.996을 내는데 이 수정 전 코드는 p=0.640을
+    # 냈다. 대칭 항등식 I_x(a,b) = 1 - I_(1-x)(b,a)로 항상 수렴이 잘
+    # 되는 쪽으로 계산하도록 고쳤다.
+    if x > (a + 1) / (a + b + 2):
+        return 1.0 - _regularized_incomplete_beta(b, a, 1 - x, iterations)
+
     lbeta = math.lgamma(a) + math.lgamma(b) - math.lgamma(a + b)
     front = math.exp(math.log(x) * a + math.log(1 - x) * b - lbeta) / a
 
