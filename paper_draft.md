@@ -148,6 +148,35 @@ kShield-VirtualPatch는 저자의 선행 연구 kShield [8]와 동일한 아키�
 
 ### 3.3 핵심 탐지 메커니즘 (SHADOW_EXEC, SHADOW_CONNECT)
 
+아래 [그림 1]은 ShadowRay 공격 체인과 그 위에 놓인 탐지 지점을 현재(v7 기준) 설계로 요약한 것이다. 세부 판정 로직(v1~v3의 재설계 과정)은 이어지는 본문에서 다룬다.
+
+**[그림 1] 공격 체인과 탐지 지점**
+
+```mermaid
+flowchart TD
+    ATK["공격자"] -->|"인증 없는 요청"| API["Ray Jobs Submission API<br/>(포트 8265, CVE-2023-48022)"]
+    API --> W["AI 워커 프로세스<br/>raylet / ray::IDLE<br/>(감시 대상)"]
+    W -->|"fork"| D["자손 프로세스<br/>sh, python3 등"]
+
+    D -->|"execve()"| BIN{"실행 파일?"}
+    BIN -->|"nc, ncat"| EXECHOOK["SHADOW_EXEC /<br/>bprm_check_security"]
+    BIN -->|"curl, wget<br/>(v4: dual-use, 통과)"| CONN["connect() 시도"]
+
+    EXECHOOK -->|"의심 바이너리"| BLOCK1["차단<br/>kprobe: 비동기 SIGKILL<br/>LSM: 동기 -EPERM"]
+
+    CONN --> DST{"목적지가 loopback /<br/>trusted_dst_ipv4[]?"}
+    DST -->|"아니오"| CONNHOOK["SHADOW_CONNECT /<br/>socket_connect"]
+    DST -->|"예"| PASS["정상 통과"]
+    CONNHOOK --> BLOCK2["차단<br/>kprobe: 비동기 SIGKILL<br/>LSM: 동기 -EPERM"]
+
+    LIN[("ai_worker_lineage<br/>BPF map")]
+    W -.->|"fork 시 등록<br/>(+ v7: /proc 백필)"| LIN
+    LIN -.->|"계보 조회"| EXECHOOK
+    LIN -.->|"계보 조회"| CONNHOOK
+```
+
+감시 대상 프로세스 자신이 fork 없이 직접 실행/연결하는 경우(v6, `watched_self[]`)는 위 그림의 "AI 워커 프로세스" 노드에서 fork 단계를 거치지 않고 바로 오른쪽 경로(`execve()`/`connect()`)로 진입하는 것으로 이해하면 된다 — 별도 노드로 그리지 않은 이유는 판정 로직상 두 경로가 이후 완전히 동일하기 때문이다.
+
 초기 설계(v1)는 `sched_process_exec` 트레이스포인트에서 새로 실행된 프로세스의 **직속 부모**만 확인하여, 부모 comm이 `watched_parents[]`(감시 대상 AI 워커 프로세스 목록, 예: `raylet`)와 일치하고 실행 파일이 `suspicious_bins[]`와 일치하면 즉시 SIGKILL을 전송하는 방식이었다.
 
 그러나 VM 실측 과정에서 두 가지 문제가 발견되었다.
