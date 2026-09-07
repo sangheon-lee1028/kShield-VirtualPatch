@@ -19,6 +19,13 @@
  * 신뢰 목적지 IP를 운영 중에 추가/삭제하려면 별도 유틸리티 kshield_ctl을
  * 쓴다 — 이 로더 자체는 맵을 만들고 핀하기만 하고, 이후의 add/del/list는
  * 전부 kshield_ctl이 담당한다.
+ *
+ * v9: --syslog 플래그를 주면 탐지 이벤트를 사람이 읽는 콘솔 출력에 더해
+ * syslog(LOG_AUTHPRIV)로도 JSON 한 줄씩 남긴다. 기업 환경에는 이미 SIEM에
+ * 로그를 모으는 rsyslog/journald 파이프라인이 있는 경우가 대부분이므로,
+ * 이 프로그램만을 위한 전용 연동을 새로 만드는 대신 이미 있는 그 통로에
+ * 올라타는 쪽을 택했다 — Falco 등 기존 런타임 보안 도구도 syslog를 출력
+ * 채널 중 하나로 지원한다.
  */
 #include <stdio.h>
 #include <signal.h>
@@ -28,6 +35,7 @@
 #include <errno.h>
 #include <stdlib.h>
 #include <dirent.h>
+#include <syslog.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <bpf/libbpf.h>
@@ -55,10 +63,31 @@ struct shadow_event {
 };
 
 static volatile sig_atomic_t exiting = 0;
+static int use_syslog = 0;
 
 static void sig_handler(int signo)
 {
     exiting = 1;
+}
+
+/* comm/filename은 공격자가 통제하는 프로세스 이름·경로에서 온 값이라,
+ * JSON 문자열에 그대로 꽂으면 따옴표/제어문자로 로그 구조 자체를 깨뜨릴
+ * 수 있다(로그 인젝션). 최소한의 이스케이프로 이를 막는다. */
+static void json_escape(char *out, size_t out_sz, const char *in)
+{
+    size_t o = 0;
+    for (size_t i = 0; in[i] != '\0' && o + 2 < out_sz; i++) {
+        unsigned char c = (unsigned char)in[i];
+        if (c == '"' || c == '\\') {
+            out[o++] = '\\';
+            out[o++] = (char)c;
+        } else if (c < 0x20) {
+            out[o++] = ' ';
+        } else {
+            out[o++] = (char)c;
+        }
+    }
+    out[o] = '\0';
 }
 
 static void handle_event(void *ctx, int cpu, void *data, __u32 data_sz)
@@ -70,15 +99,34 @@ static void handle_event(void *ctx, int cpu, void *data, __u32 data_sz)
 
     const char *action = e->enforced ? "SIGKILL 전송" : "[AUDIT-ONLY] 차단 안 함(로그만)";
 
+    char parent_esc[MAX_COMM_LEN * 2] = {};
+    char comm_esc[MAX_COMM_LEN * 2] = {};
+    if (use_syslog) {
+        json_escape(parent_esc, sizeof(parent_esc), e->parent_comm);
+        json_escape(comm_esc, sizeof(comm_esc), e->comm);
+    }
+
     if (e->type == EVT_SHADOW_EXEC) {
         printf("[%s] SHADOW_EXEC 탐지! parent=%s(pid=%u) -> child=%s(pid=%u) exec=%s => %s\n",
                ts, e->parent_comm, e->ppid, e->comm, e->pid, e->filename, action);
+        if (use_syslog) {
+            char file_esc[MAX_PATH_LEN * 2] = {};
+            json_escape(file_esc, sizeof(file_esc), e->filename);
+            syslog(LOG_ALERT,
+                "{\"tool\":\"kshield_vpatch\",\"event\":\"SHADOW_EXEC\",\"parent_comm\":\"%s\",\"ppid\":%u,\"comm\":\"%s\",\"pid\":%u,\"filename\":\"%s\",\"enforced\":%s}",
+                parent_esc, e->ppid, comm_esc, e->pid, file_esc, e->enforced ? "true" : "false");
+        }
     } else if (e->type == EVT_SHADOW_CONNECT) {
         struct in_addr addr = { .s_addr = htonl(e->dst_addr) };
         char ip_str[INET_ADDRSTRLEN];
         inet_ntop(AF_INET, &addr, ip_str, sizeof(ip_str));
         printf("[%s] SHADOW_CONNECT 탐지! parent=%s -> proc=%s(pid=%u) dst=%s:%u => %s\n",
                ts, e->parent_comm, e->comm, e->pid, ip_str, e->dst_port, action);
+        if (use_syslog) {
+            syslog(LOG_ALERT,
+                "{\"tool\":\"kshield_vpatch\",\"event\":\"SHADOW_CONNECT\",\"parent_comm\":\"%s\",\"comm\":\"%s\",\"pid\":%u,\"dst_ip\":\"%s\",\"dst_port\":%u,\"enforced\":%s}",
+                parent_esc, comm_esc, e->pid, ip_str, e->dst_port, e->enforced ? "true" : "false");
+        }
     }
     fflush(stdout);
 }
@@ -256,7 +304,12 @@ int main(int argc, char **argv)
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--audit-only") == 0)
             audit_only = 1;
+        else if (strcmp(argv[i], "--syslog") == 0)
+            use_syslog = 1;
     }
+
+    if (use_syslog)
+        openlog("kshield_vpatch", LOG_PID, LOG_AUTHPRIV);
 
     libbpf_set_print(libbpf_print_fn);
 
@@ -274,6 +327,14 @@ int main(int argc, char **argv)
      * 맵을 그대로 재사용하므로, 신뢰 목적지 목록도 재시작 사이에 유지된다. */
     if (bpf_map__set_pin_path(skel->maps.trusted_dst_ipv4_map, "/sys/fs/bpf/kshield_trusted_ips_v3")) {
         fprintf(stderr, "[경고] trusted_dst_ipv4_map pin 경로 설정 실패: %s\n", strerror(errno));
+    }
+
+    /* v9: exempt_uids_map도 동일한 이유로 핀한다 — GPU를 오래 점유하는
+     * job을 오탐으로 죽였을 때의 비용이 크므로, 검증된 사용자(UID) 단위로
+     * 감시 자체를 예외 처리할 수 있어야 한다는 지적을 반영하였다.
+     * kshield_ctl exempt-add/exempt-del/exempt-list로 운영 중에 관리한다. */
+    if (bpf_map__set_pin_path(skel->maps.exempt_uids_map, "/sys/fs/bpf/kshield_exempt_uids_v3")) {
+        fprintf(stderr, "[경고] exempt_uids_map pin 경로 설정 실패: %s\n", strerror(errno));
     }
 
     err = kshield_vpatch_bpf__load(skel);
@@ -307,6 +368,7 @@ int main(int argc, char **argv)
 
     printf("kShield-VirtualPatch 실행 중... (Ctrl+C로 종료)\n");
     printf("모드: %s\n", audit_only ? "AUDIT-ONLY (탐지만, 차단 안 함)" : "ENFORCE (탐지 즉시 SIGKILL)");
+    printf("syslog 연동: %s\n", use_syslog ? "켜짐 (LOG_AUTHPRIV, JSON)" : "꺼짐 (--syslog로 활성화)");
     printf("감시 1: watched_parents[] 계보가 suspicious_bins[]를 실행하는지 (SHADOW_EXEC)\n");
     printf("감시 2: watched_parents[] 계보가 신뢰되지 않은 목적지로 connect()하는지 (SHADOW_CONNECT)\n\n");
 
@@ -322,5 +384,7 @@ int main(int argc, char **argv)
 cleanup:
     perf_buffer__free(pb);
     kshield_vpatch_bpf__destroy(skel);
+    if (use_syslog)
+        closelog();
     return -err;
 }

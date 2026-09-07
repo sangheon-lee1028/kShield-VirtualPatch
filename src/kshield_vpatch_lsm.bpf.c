@@ -157,6 +157,15 @@ struct {
     __type(value, __u8);
 } ai_worker_lineage SEC(".maps");
 
+/* v9: kshield_vpatch.bpf.c와 동일한 재검토 — 검증된 사용자(UID) 단위로
+ * 감시를 예외 처리할 수 있게 한다(상세 근거는 그 파일 헤더 참고). */
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 256);
+    __type(key, __u32);
+    __type(value, __u8);
+} exempt_uids_map SEC(".maps");
+
 static __always_inline int str_eq(const char *a, const volatile char *b, int max_len)
 {
     for (int i = 0; i < max_len; i++) {
@@ -188,9 +197,16 @@ static __always_inline int is_watched_self(const char *comm)
 
 /* v6: kshield_vpatch.bpf.c와 동일한 재검토 — "자손"만 계보에 편입되고
  * 감시 대상 프로세스 자신의 직접 행위는 놓치는 공백을 자기 자신 comm
- * 확인(watched_self[])으로 메운다. */
+ * 확인(watched_self[])으로 메운다.
+ *
+ * v9: exempt_uids_map에 있는 UID는 최우선으로 감시 대상에서 제외한다
+ * (상세 근거는 kshield_vpatch.bpf.c 헤더 참고). */
 static __always_inline int current_is_watched(char (*parent_comm_out)[MAX_COMM_LEN])
 {
+    __u32 uid = (__u32)bpf_get_current_uid_gid();
+    if (bpf_map_lookup_elem(&exempt_uids_map, &uid) != NULL)
+        return 0;
+
     __u32 pid = bpf_get_current_pid_tgid() >> 32;
     __u8 *in_lineage = bpf_map_lookup_elem(&ai_worker_lineage, &pid);
 

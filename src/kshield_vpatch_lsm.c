@@ -16,6 +16,11 @@
  * v8: trusted_dst_ipv4_map을 /sys/fs/bpf/kshield_trusted_ips_lsm에 핀해
  * 둔다. 신뢰 목적지 IP의 add/del/list는 kshield_vpatch.c와 마찬가지로
  * 별도 유틸리티 kshield_ctl이 담당한다.
+ *
+ * v9: --syslog 플래그로 탐지 이벤트를 syslog(LOG_AUTHPRIV)에도 JSON 한
+ * 줄씩 남긴다(kshield_vpatch.c와 동일한 이유 — 기존 SIEM 파이프라인에
+ * 올라타기 위함). exempt_uids_map도 함께 핀해, 검증된 사용자(UID) 단위로
+ * 감시를 예외 처리할 수 있게 한다.
  */
 #include <stdio.h>
 #include <signal.h>
@@ -25,6 +30,7 @@
 #include <errno.h>
 #include <stdlib.h>
 #include <dirent.h>
+#include <syslog.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <bpf/libbpf.h>
@@ -52,10 +58,30 @@ struct shadow_event {
 };
 
 static volatile sig_atomic_t exiting = 0;
+static int use_syslog = 0;
 
 static void sig_handler(int signo)
 {
     exiting = 1;
+}
+
+/* comm/filename은 공격자가 통제하는 값에서 오므로, JSON에 그대로 꽂으면
+ * 로그 인젝션이 가능하다(kshield_vpatch.c와 동일한 이유). */
+static void json_escape(char *out, size_t out_sz, const char *in)
+{
+    size_t o = 0;
+    for (size_t i = 0; in[i] != '\0' && o + 2 < out_sz; i++) {
+        unsigned char c = (unsigned char)in[i];
+        if (c == '"' || c == '\\') {
+            out[o++] = '\\';
+            out[o++] = (char)c;
+        } else if (c < 0x20) {
+            out[o++] = ' ';
+        } else {
+            out[o++] = (char)c;
+        }
+    }
+    out[o] = '\0';
 }
 
 /* CONFIG_BPF_LSM=y이고 활성 LSM 목록에 "bpf"가 있는지 미리 확인한다.
@@ -99,10 +125,24 @@ static void handle_event(void *ctx, int cpu, void *data, __u32 data_sz)
     char ts[32];
     strftime(ts, sizeof(ts), "%H:%M:%S", localtime(&now));
 
+    char parent_esc[MAX_COMM_LEN * 2] = {};
+    char comm_esc[MAX_COMM_LEN * 2] = {};
+    if (use_syslog) {
+        json_escape(parent_esc, sizeof(parent_esc), e->parent_comm);
+        json_escape(comm_esc, sizeof(comm_esc), e->comm);
+    }
+
     if (e->type == EVT_LSM_EXEC_BLOCK) {
         const char *action = e->enforced ? "execve() -EPERM" : "[AUDIT-ONLY] execve() 허용됨(로그만)";
         printf("[%s] LSM_EXEC_BLOCK 탐지! proc=%s(pid=%u) parent=%s exec=%s => %s\n",
                ts, e->comm, e->pid, e->parent_comm, e->filename, action);
+        if (use_syslog) {
+            char file_esc[MAX_PATH_LEN * 2] = {};
+            json_escape(file_esc, sizeof(file_esc), e->filename);
+            syslog(LOG_ALERT,
+                "{\"tool\":\"kshield_vpatch_lsm\",\"event\":\"LSM_EXEC_BLOCK\",\"comm\":\"%s\",\"pid\":%u,\"parent_comm\":\"%s\",\"filename\":\"%s\",\"enforced\":%s}",
+                comm_esc, e->pid, parent_esc, file_esc, e->enforced ? "true" : "false");
+        }
     } else if (e->type == EVT_LSM_CONNECT_BLOCK) {
         struct in_addr addr = { .s_addr = htonl(e->dst_addr) };
         char ip_str[INET_ADDRSTRLEN];
@@ -110,6 +150,11 @@ static void handle_event(void *ctx, int cpu, void *data, __u32 data_sz)
         const char *action = e->enforced ? "connect() -EPERM" : "[AUDIT-ONLY] connect() 허용됨(로그만)";
         printf("[%s] LSM_CONNECT_BLOCK 탐지! proc=%s(pid=%u) parent=%s dst=%s:%u => %s\n",
                ts, e->comm, e->pid, e->parent_comm, ip_str, e->dst_port, action);
+        if (use_syslog) {
+            syslog(LOG_ALERT,
+                "{\"tool\":\"kshield_vpatch_lsm\",\"event\":\"LSM_CONNECT_BLOCK\",\"comm\":\"%s\",\"pid\":%u,\"parent_comm\":\"%s\",\"dst_ip\":\"%s\",\"dst_port\":%u,\"enforced\":%s}",
+                comm_esc, e->pid, parent_esc, ip_str, e->dst_port, e->enforced ? "true" : "false");
+        }
     }
     fflush(stdout);
 }
@@ -274,7 +319,12 @@ int main(int argc, char **argv)
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--audit-only") == 0)
             audit_only = 1;
+        else if (strcmp(argv[i], "--syslog") == 0)
+            use_syslog = 1;
     }
+
+    if (use_syslog)
+        openlog("kshield_vpatch_lsm", LOG_PID, LOG_AUTHPRIV);
 
     libbpf_set_print(libbpf_print_fn);
 
@@ -295,6 +345,11 @@ int main(int argc, char **argv)
      * 컴포넌트가 서로 다른 BPF 오브젝트라 맵을 공유하지 않기 때문이다. */
     if (bpf_map__set_pin_path(skel->maps.trusted_dst_ipv4_map, "/sys/fs/bpf/kshield_trusted_ips_lsm")) {
         fprintf(stderr, "[경고] trusted_dst_ipv4_map pin 경로 설정 실패: %s\n", strerror(errno));
+    }
+
+    /* v9: exempt_uids_map도 핀한다(kshield_vpatch.c와 동일한 이유). */
+    if (bpf_map__set_pin_path(skel->maps.exempt_uids_map, "/sys/fs/bpf/kshield_exempt_uids_lsm")) {
+        fprintf(stderr, "[경고] exempt_uids_map pin 경로 설정 실패: %s\n", strerror(errno));
     }
 
     err = kshield_vpatch_lsm_bpf__load(skel);
@@ -333,6 +388,7 @@ int main(int argc, char **argv)
 
     printf("kShield-VirtualPatch-LSM 실행 중... (Ctrl+C로 종료)\n");
     printf("모드: %s\n", audit_only ? "AUDIT-ONLY (탐지만, -EPERM 반환 안 함)" : "ENFORCE (탐지 즉시 -EPERM)");
+    printf("syslog 연동: %s\n", use_syslog ? "켜짐 (LOG_AUTHPRIV, JSON)" : "꺼짐 (--syslog로 활성화)");
     printf("감시 1: watched_parents[] 계보의 execve()가 suspicious_bins[]이면 사전 차단 (bprm_check_security)\n");
     printf("감시 2: watched_parents[] 계보의 connect()가 신뢰되지 않은 목적지면 사전 차단 (socket_connect)\n");
     printf("메인 구현(kshield_vpatch, kprobe+SIGKILL)과 달리 시스템 콜 자체가 즉시 실패한다.\n\n");
@@ -349,5 +405,7 @@ int main(int argc, char **argv)
 cleanup:
     perf_buffer__free(pb);
     kshield_vpatch_lsm_bpf__destroy(skel);
+    if (use_syslog)
+        closelog();
     return -err;
 }

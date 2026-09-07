@@ -208,6 +208,18 @@ struct {
     __type(value, __u8);
 } ai_worker_lineage SEC(".maps");
 
+/* v9: 특정 UID를 감시에서 완전히 제외하는 예외 목록. GPU를 오래 점유하는
+ * 학습·추론 job을 오탐으로 SIGKILL했을 때의 비용(수천 달러 규모의 GPU
+ * 시간 손실)이 매우 크다는 지적을 반영해, 검증된 사용자(UID) 단위로
+ * 감시 자체를 건너뛸 수 있게 한다. key=UID, value=1(예외 처리됨).
+ * kshield_ctl exempt-add/exempt-del/exempt-list가 런타임에 관리한다. */
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 256);
+    __type(key, __u32);
+    __type(value, __u8);
+} exempt_uids_map SEC(".maps");
+
 static __always_inline int str_eq(const char *a, const volatile char *b, int max_len)
 {
     for (int i = 0; i < max_len; i++) {
@@ -246,9 +258,17 @@ static __always_inline int is_watched_self(const char *comm)
  * 프로세스 자신(watched_self[])이 fork 없이 직접 execve()/connect()를
  * 호출하면 어느 조건도 참이 되지 않아 놓치는 문제가 있었다. 세 번째
  * 조건으로 "내 자신의 comm이 watched_self[]와 일치하는가"를 추가하여
- * 이를 해소한다. */
+ * 이를 해소한다.
+ *
+ * v9: exempt_uids_map에 있는 UID는 다른 조건과 무관하게 항상 감시 대상이
+ * 아닌 것으로 처리한다(최우선 확인) — 오탐 시 비용이 큰 job을 실행하는
+ * 검증된 사용자를 계보/자기자신 판정보다 먼저 완전히 제외시키기 위함. */
 static __always_inline int current_is_watched(char (*parent_comm_out)[MAX_COMM_LEN])
 {
+    __u32 uid = (__u32)bpf_get_current_uid_gid();
+    if (bpf_map_lookup_elem(&exempt_uids_map, &uid) != NULL)
+        return 0;
+
     __u32 pid = bpf_get_current_pid_tgid() >> 32;
     __u8 *in_lineage = bpf_map_lookup_elem(&ai_worker_lineage, &pid);
 
