@@ -14,6 +14,11 @@
  * SIGKILL은 보내지 않는다(BPF 쪽 enforce_mode 전역 변수를 0으로 설정).
  * WAF 신규 룰을 먼저 감사(alert-only)로 배포해 오탐을 관찰한 뒤 차단으로
  * 전환하는 업계 관행을 반영한 것으로, 재컴파일 없이 실행 시점에 설정된다.
+ *
+ * v8: trusted_dst_ipv4_map을 /sys/fs/bpf/kshield_trusted_ips_v3에 핀해 둔다.
+ * 신뢰 목적지 IP를 운영 중에 추가/삭제하려면 별도 유틸리티 kshield_ctl을
+ * 쓴다 — 이 로더 자체는 맵을 만들고 핀하기만 하고, 이후의 add/del/list는
+ * 전부 kshield_ctl이 담당한다.
  */
 #include <stdio.h>
 #include <signal.h>
@@ -262,6 +267,14 @@ int main(int argc, char **argv)
     }
 
     skel->data->enforce_mode = audit_only ? 0 : 1;
+
+    /* v8: trusted_dst_ipv4_map을 bpffs에 핀(pin)해, kshield_ctl 같은 별도
+     * 프로세스가 데몬 재시작 없이 신뢰 목적지 IP를 add/del할 수 있게 한다.
+     * 이전 실행에서 이미 핀되어 있었다면(예: 데몬 재시작) libbpf가 기존
+     * 맵을 그대로 재사용하므로, 신뢰 목적지 목록도 재시작 사이에 유지된다. */
+    if (bpf_map__set_pin_path(skel->maps.trusted_dst_ipv4_map, "/sys/fs/bpf/kshield_trusted_ips_v3")) {
+        fprintf(stderr, "[경고] trusted_dst_ipv4_map pin 경로 설정 실패: %s\n", strerror(errno));
+    }
 
     err = kshield_vpatch_bpf__load(skel);
     if (err) {

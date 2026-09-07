@@ -37,7 +37,8 @@
  *     되지 않은 목적지로 나가는 연결을 시도했는가"를 감시하면, 어떤
  *     바이너리·언어로 구현되었든 상관없이 포착할 수 있다는 뜻이다.
  *   - v3는 SHADOW_CONNECT 탐지를 추가한다: AI 워커 계보에 속한 프로세스가
- *     loopback(127.0.0.0/8) 또는 trusted_dst_ipv4[]에 없는 목적지로
+ *     loopback(127.0.0.0/8) 또는 신뢰 목적지 목록(v8부터 trusted_dst_ipv4_map,
+ *     이전에는 trusted_dst_ipv4[] rodata 배열)에 없는 목적지로
  *     연결을 시도하면 즉시 SIGKILL을 전송한다. 기존 SHADOW_EXEC(v2)는
  *     그대로 유지하여 두 계층이 함께 방어한다(defense-in-depth) — 알려진
  *     바이너리는 exec 시점에 더 일찍 잡고, 그 외 모든 경로는 connect
@@ -86,7 +87,6 @@ char LICENSE[] SEC("license") = "GPL";
 #define MAX_WATCHED_SELF     8
 #define MAX_SUSPICIOUS_BIN   8
 #define MAX_PATH_LEN         64
-#define MAX_TRUSTED_IPS      8
 
 #define EVT_SHADOW_EXEC    1
 #define EVT_SHADOW_CONNECT 2
@@ -135,7 +135,7 @@ const volatile char watched_self[MAX_WATCHED_SELF][MAX_COMM_LEN] = {
  * 즉시 SIGKILL하면 정당한 다운로드 job까지 오탐으로 죽인다. curl/wget의
  * 실제 위험은 "어디로 연결하는가"에 있으므로, 이 판단은 목적지를 아는
  * SHADOW_CONNECT(아래)에게 전적으로 맡긴다 — 신뢰 목적지(loopback,
- * trusted_dst_ipv4[])로 가는 curl/wget은 exec도 connect도 통과하고,
+ * trusted_dst_ipv4_map)로 가는 curl/wget은 exec도 connect도 통과하고,
  * 신뢰 안 된 목적지로 가면 exec은 통과해도 connect 시점에 잡힌다.
  *
  * 반면 nc/ncat은 AI 워커 계보에서 합법적으로 실행될 이유가 사실상
@@ -155,12 +155,22 @@ const volatile char suspicious_bins[MAX_SUSPICIOUS_BIN][MAX_PATH_LEN] = {
     "/usr/bin/ncat",
 };
 
-/* loopback(127.0.0.0/8) 외에 AI 워커 계보가 연결해도 되는 목적지 IPv4
- * 주소(호스트 바이트 순서). 실 배포 시 클러스터 내부 노드, 신뢰된 내부
- * 스토리지 등의 IP를 추가한다. 기본값은 비어 있음(loopback만 허용) —
- * 본 PoC의 mock 서버는 정상 job 처리 중 외부 연결이 전혀 필요 없기
- * 때문이다. */
-const volatile __u32 trusted_dst_ipv4[MAX_TRUSTED_IPS] = {};
+/* v8 재검토: 신뢰 목적지 IP를 rodata 배열이 아닌 BPF map으로 관리한다.
+ * 클라우드 스토리지(S3, HuggingFace 등)처럼 실제 운영에서 자주 바뀌는
+ * 목적지를 컴파일 타임 상수로 두면, IP 하나 추가할 때마다 재컴파일·
+ * 재배포가 필요해 운영팀이 이 도구를 도입할 유인이 없어진다는 지적을
+ * 반영하였다. key=IPv4 주소(호스트 바이트 순서), value=1(신뢰됨).
+ * `kshield_ctl` 유틸리티(별도 바이너리)가 이 맵을 실행 시점에 add/del/
+ * list하며, 데몬을 재시작하거나 재컴파일할 필요가 없다 — 유저스페이스
+ * 로더가 이 맵을 `/sys/fs/bpf/kshield_trusted_ips_v3`에 핀(pin)해 두어
+ * 별도 프로세스에서도 접근 가능하게 한다(kshield_vpatch.c 참고). loopback
+ * (127.0.0.0/8)은 이 맵과 무관하게 항상 신뢰된다. */
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 1024);
+    __type(key, __u32);
+    __type(value, __u8);
+} trusted_dst_ipv4_map SEC(".maps");
 
 /* v5: audit-only(감사 전용) 모드. WAF 업계의 표준 관행 — 신규 룰은 먼저
  * "감지만 하고 차단은 안 함"으로 배포해 오탐을 관찰한 뒤에야 실제 차단으로
@@ -345,11 +355,7 @@ static __always_inline int is_loopback_or_trusted(__u32 addr_host_order)
 {
     if ((addr_host_order >> 24) == 127) /* 127.0.0.0/8 */
         return 1;
-    for (int i = 0; i < MAX_TRUSTED_IPS; i++) {
-        if (trusted_dst_ipv4[i] != 0 && trusted_dst_ipv4[i] == addr_host_order)
-            return 1;
-    }
-    return 0;
+    return bpf_map_lookup_elem(&trusted_dst_ipv4_map, &addr_host_order) != NULL;
 }
 
 /*

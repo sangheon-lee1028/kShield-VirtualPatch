@@ -12,6 +12,10 @@
  * --audit-only 플래그를 주면 탐지 이벤트는 로그로 남기되 실제 -EPERM은
  * 반환하지 않아 execve()/connect()가 정상 진행되게 둔다(BPF 쪽
  * enforce_mode 전역 변수를 0으로 설정, 재컴파일 불필요).
+ *
+ * v8: trusted_dst_ipv4_map을 /sys/fs/bpf/kshield_trusted_ips_lsm에 핀해
+ * 둔다. 신뢰 목적지 IP의 add/del/list는 kshield_vpatch.c와 마찬가지로
+ * 별도 유틸리티 kshield_ctl이 담당한다.
  */
 #include <stdio.h>
 #include <signal.h>
@@ -284,6 +288,14 @@ int main(int argc, char **argv)
     }
 
     skel->data->enforce_mode = audit_only ? 0 : 1;
+
+    /* v8: trusted_dst_ipv4_map을 bpffs에 핀해 kshield_ctl이 재시작·재컴파일
+     * 없이 신뢰 목적지 IP를 add/del할 수 있게 한다(kshield_vpatch.c와 동일한
+     * 이유 — 상세 근거는 그 파일 참고). v3와 별도 경로를 쓰는 이유는 두
+     * 컴포넌트가 서로 다른 BPF 오브젝트라 맵을 공유하지 않기 때문이다. */
+    if (bpf_map__set_pin_path(skel->maps.trusted_dst_ipv4_map, "/sys/fs/bpf/kshield_trusted_ips_lsm")) {
+        fprintf(stderr, "[경고] trusted_dst_ipv4_map pin 경로 설정 실패: %s\n", strerror(errno));
+    }
 
     err = kshield_vpatch_lsm_bpf__load(skel);
     if (err) {

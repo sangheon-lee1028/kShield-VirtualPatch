@@ -62,7 +62,6 @@ char LICENSE[] SEC("license") = "GPL";
 #define MAX_WATCHED_SELF     8
 #define MAX_SUSPICIOUS_BIN   8
 #define MAX_PATH_LEN         64
-#define MAX_TRUSTED_IPS      8
 
 #define EVT_LSM_EXEC_BLOCK    3
 #define EVT_LSM_CONNECT_BLOCK 4
@@ -112,7 +111,16 @@ const volatile char suspicious_bins[MAX_SUSPICIOUS_BIN][MAX_PATH_LEN] = {
     "/usr/bin/ncat",
 };
 
-const volatile __u32 trusted_dst_ipv4[MAX_TRUSTED_IPS] = {};
+/* v8 재검토: 신뢰 목적지 IP를 rodata 배열이 아닌 BPF map으로 관리한다
+ * (kshield_vpatch.bpf.c와 동일한 재검토 — 상세 근거는 그 파일 헤더 참고).
+ * `kshield_ctl`이 `/sys/fs/bpf/kshield_trusted_ips_lsm`에 핀된 이 맵을
+ * add/del/list하며, 데몬 재시작·재컴파일이 필요 없다. */
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 1024);
+    __type(key, __u32);
+    __type(value, __u8);
+} trusted_dst_ipv4_map SEC(".maps");
 
 /* v5: audit-only(감사 전용) 모드. kshield_vpatch.bpf.c와 동일한 목적 —
  * 신규 룰을 먼저 "탐지만 하고 차단은 안 함"으로 배포해 오탐을 관찰한 뒤
@@ -205,11 +213,7 @@ static __always_inline int is_loopback_or_trusted(__u32 addr_host_order)
 {
     if ((addr_host_order >> 24) == 127) /* 127.0.0.0/8 */
         return 1;
-    for (int i = 0; i < MAX_TRUSTED_IPS; i++) {
-        if (trusted_dst_ipv4[i] != 0 && trusted_dst_ipv4[i] == addr_host_order)
-            return 1;
-    }
-    return 0;
+    return bpf_map_lookup_elem(&trusted_dst_ipv4_map, &addr_host_order) != NULL;
 }
 
 SEC("tp/sched/sched_process_fork")
