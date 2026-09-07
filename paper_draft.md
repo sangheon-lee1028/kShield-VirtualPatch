@@ -49,7 +49,7 @@ AI 서빙 프레임워크(Ray, vLLM, Triton Inference Server, MLflow 등)는 대
 
 이러한 상황에서 방어자가 취할 수 있는 현실적인 선택지는 제한적이다. 프레임워크 자체를 수정하는 것은 벤더의 협조 없이는 어렵고, 프레임워크 업그레이드는 프로덕션 환경의 호환성 리스크 때문에 신중하게 이루어져야 한다. 웹 애플리케이션 보안 분야에서는 이런 상황에 대응하기 위해 WAF(Web Application Firewall) 수준에서 "가상 패치(virtual patching)"라는 개념이 오래전부터 활용되어 왔다 [7] — 취약점 자체를 고치지 못하는 동안, 그 취약점이 악용될 때 나타나는 특정 패턴만 탐지하여 임시로 차단하는 기법이다.
 
-본 논문은 이 개념을 AI 서빙 프레임워크의 커널 수준으로 확장한다. eBPF를 이용하면 애플리케이션 코드를 한 줄도 수정하지 않고, 재시작도 없이, 실행 중인 프로세스에 탐지 로직을 "붙였다 뗄 수 있다." 이는 정식 패치가 배포되기 전까지의 공백을 메우는 임시 방어선이자, 정식 패치가 나온 뒤에는 훅을 제거하기만 하면 되는 저비용 대응 수단이 된다.
+본 논문은 이 개념을 AI 서빙 프레임워크의 커널 수준으로 확장한다. eBPF를 이용하면 애플리케이션 코드를 한 줄도 수정하지 않고 실행 중인 프로세스에 탐지 로직을 "붙였다 뗄 수 있다." 이 무재부팅(no-restart) 성질은 기본 방어선인 SHADOW_EXEC/SHADOW_CONNECT(3.3절)에는 재부팅 없이 그대로 적용되지만, 더 강한 보장(동기적 사전 차단)을 제공하는 LSM 컴포넌트(3.5절)는 커널 부팅 파라미터 변경과 재부팅이 필요해 이 성질을 온전히 물려받지 못한다 — 두 컴포넌트를 독립된 계층으로 유지하는 이유이기도 하다(3.5절 상세 논의 참고). 이는 정식 패치가 배포되기 전까지의 공백을 메우는 임시 방어선이자, 정식 패치가 나온 뒤에는 훅을 제거하기만 하면 되는 저비용 대응 수단이 된다.
 
 본 연구의 주요 기여는 다음과 같다.
 - AI 서빙 프레임워크의 알려진 RCE 취약점 중 ShadowRay를 사례 연구로 삼아 eBPF 기반 가상 패치 메커니즘을 설계·구현 — 다른 프레임워크·CVE로의 일반화는 검증하지 않았으며 향후 연구로 남긴다(5장)
@@ -226,7 +226,7 @@ SHADOW_EXEC/SHADOW_CONNECT는 모두 "행위가 발생한 뒤 `bpf_send_signal(9
 
 두 훅 모두 커널 호출 경로상 SHADOW_EXEC/SHADOW_CONNECT가 관측하는 지점(`sched_process_exec` tracepoint, `tcp_v4_connect`/`tcp_v6_connect`)보다 앞서 실행되므로, 이 LSM 컴포넌트가 성공적으로 attach된 환경에서는 대부분의 시도가 SHADOW_EXEC/SHADOW_CONNECT까지 도달하기 전에 이미 차단된다. 두 컴포넌트를 동시에 로드해도 서로 간섭하지 않으며, LSM attach가 불가능한 환경에서는 SHADOW_EXEC/SHADOW_CONNECT가 계속 방어선 역할을 한다.
 
-`BPF_PROG_TYPE_LSM`은 `CONFIG_BPF_LSM=y` 커널과, 활성 LSM 목록(`/sys/kernel/security/lsm`)에 `"bpf"` 포함을 요구한다. 이는 배포판·배포 설정에 따라 기본값이 다르며, 포함되어 있지 않다면 부팅 파라미터에 `lsm=...,bpf`를 추가하고 재부팅해야 한다. 실험 환경(4.1절)에서는 재부팅 전 `/sys/kernel/security/lsm`이 `lockdown,capability,landlock,yama,apparmor`였고, `lsm=lockdown,capability,landlock,yama,apparmor,bpf`로 GRUB 설정을 변경하고 재부팅한 뒤에는 `bpf`가 포함되어 attach가 성공하였다. **이 재부팅 요구사항 자체가 실무적 배포 비용이다** — 공유 서버 환경에서는 재부팅 가능 여부를 사전에 협의해야 하며, 이 요구사항이 SHADOW_EXEC/SHADOW_CONNECT(3.3절)에는 없다는 점이 본 논문이 두 계층을 모두 유지하는 이유다.
+`BPF_PROG_TYPE_LSM`은 `CONFIG_BPF_LSM=y` 커널과, 활성 LSM 목록(`/sys/kernel/security/lsm`)에 `"bpf"` 포함을 요구한다. 이는 배포판·배포 설정에 따라 기본값이 다르며, 포함되어 있지 않다면 부팅 파라미터에 `lsm=...,bpf`를 추가하고 재부팅해야 한다. 실험 환경(4.1절)에서는 재부팅 전 `/sys/kernel/security/lsm`이 `lockdown,capability,landlock,yama,apparmor`였고, `lsm=lockdown,capability,landlock,yama,apparmor,bpf`로 GRUB 설정을 변경하고 재부팅한 뒤에는 `bpf`가 포함되어 attach가 성공하였다. **이 재부팅 요구사항 자체가 실무적 배포 비용이다** — 특히 관리형 쿠버네티스(EKS, GKE 등)나 여러 팀이 공유하는 GPU 클러스터에서는 노드 하나를 재부팅하는 것이 애플리케이션 재시작보다 훨씬 큰 작업(다른 팀의 작업까지 함께 중단됨)이므로, 재부팅 가능 여부를 사전에 협의해야 한다. 이 요구사항이 SHADOW_EXEC/SHADOW_CONNECT(3.3절)에는 없다는 점이 본 논문이 두 계층을 모두 유지하는 이유다 — 1장·서론에서 강조한 "재시작 없이 훅을 붙였다 뗄 수 있다"는 성질은 이 기본 방어선에 한정되며, LSM 컴포넌트는 그 성질을 온전히 물려받지 못하는 트레이드오프를 감수한다.
 
 **VM 실측 결과**: `bpftool link list`로 확인한 결과 두 훅 모두 `attach_type lsm_mac`으로 동일하게 attach되었다. 기능 검증을 위해 3.4절의 공격 재현 환경으로 세 시나리오(정상 job, 알려진 바이너리 실행, 블록리스트 우회)를 재현하였다.
 
