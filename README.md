@@ -38,6 +38,7 @@ kShield-VirtualPatch/
 │   ├── kshield_vpatch.c          사용자 공간 로더/로거
 │   ├── kshield_vpatch_lsm.bpf.c  LSM 훅 기반 동기적 사전 차단, 기능·성능 검증 완료
 │   ├── kshield_vpatch_lsm.c      (실험적) 위 컴포넌트의 사용자 공간 로더
+│   ├── kshield_ctl.c             신뢰 IP·감시 예외 UID 런타임 제어 도구 (재시작·재컴파일 불필요)
 │   └── Makefile
 └── attack/
     ├── mock_ray_server.py      ShadowRay 취약점 재현용 목업 Jobs API
@@ -77,6 +78,20 @@ sudo ./src/kshield_vpatch --audit-only
 
 # 6) (나중에, 실험 단계) 성능 오버헤드 측정
 python3 attack/benchmark_vpatch.py --count 500 --output metrics_vpatch_on.csv
+
+# 7) 신뢰 목적지 IP를 재시작 없이 런타임에 추가/삭제 (v8)
+sudo ./src/kshield_ctl trust-add 1.1.1.1
+sudo ./src/kshield_ctl trust-list
+sudo ./src/kshield_ctl trust-del 1.1.1.1
+
+# 8) 특정 사용자(UID)를 감시에서 완전히 예외 처리 (v9, GPU job 오탐 비용 대응)
+sudo ./src/kshield_ctl exempt-add "$(id -u)"
+sudo ./src/kshield_ctl exempt-list
+sudo ./src/kshield_ctl exempt-del "$(id -u)"
+
+# 9) syslog(JSON) 연동 — 기존 SIEM 파이프라인(rsyslog/journald)에 이벤트 전달
+sudo ./src/kshield_vpatch --syslog
+journalctl -t kshield_vpatch -n 20 --no-pager
 ```
 
 `attacker.example` 같은 존재하지 않는 도메인은 DNS 조회에서 실패해 `connect()`
@@ -87,8 +102,9 @@ python3 attack/benchmark_vpatch.py --count 500 --output metrics_vpatch_on.csv
 
 **v3(kprobe/tracepoint) + LSM 사전 차단 모두 기능·성능 검증 완료.** v4(curl/wget
 재분류)·v5(audit-only 모드)·v6(감시 대상 자신의 직접 행위 탐지)·v7(데몬
-재시작/최초 기동 시 계보 백필)까지 VM에서 검증하였다. 상세 수치는
-`paper_draft.md` 4.4절·3.6절·3.7절·3.8절 참고.
+재시작/최초 기동 시 계보 백필)·v8(신뢰 IP 런타임 제어)·v9(UID 감시 예외 +
+syslog 연동)까지 VM에서 검증하였다. 상세 수치는 `paper_draft.md`
+4.4절·3.6절·3.7절·3.8절·3.9절 참고.
 
 VM 실측(Ubuntu, 실제 curl/bash 사용)으로 다음을 확인하였다.
 - 빌드: 컴파일·CO-RE 재배치·attach(v3: kprobe/tracepoint, LSM:
@@ -108,6 +124,11 @@ VM 실측(Ubuntu, 실제 curl/bash 사용)으로 다음을 확인하였다.
 - v7: 데몬 기동 전부터 이미 떠 있던 2단계 손자뻘 프로세스 체인(예: raylet →
   bash → curl)이 `/proc` 백필로 계보에 편입되어 v3·LSM 양쪽에서 정확히
   탐지됨을 확인 — 직속 부모 검사만으로는 잡을 수 없는 경우
+- v8/v9: 신뢰 IP 등록/해제(`kshield_ctl trust-add/trust-del`)와 UID 감시
+  예외 등록/해제(`kshield_ctl exempt-add/exempt-del`)가 데몬 재시작·
+  재컴파일 없이 즉시 반영됨을 확인 — 6회 curl 시도 중 예외가 적용된 2회만
+  통과(로그 없음)하고 나머지 4회는 차단, `--syslog` 활성화 시
+  `journalctl -t kshield_vpatch`에 JSON 4건이 정확히 대응됨을 확인
 
 `paper_draft.md`에 위 결과가 전부 반영되어 있다.
 
