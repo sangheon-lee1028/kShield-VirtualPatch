@@ -256,7 +256,9 @@ static __always_inline int current_is_watched(char (*parent_comm_out)[MAX_COMM_L
 
     char self_comm[MAX_COMM_LEN] = {};
     bpf_get_current_comm(&self_comm, sizeof(self_comm));
-    return is_watched_self(self_comm);
+    int self_watched = is_watched_self(self_comm);
+    bpf_printk("kshield DEBUG: self_comm=[%s] self_watched=%d", self_comm, self_watched);
+    return self_watched;
 }
 
 /*
