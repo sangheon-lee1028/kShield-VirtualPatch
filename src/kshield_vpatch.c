@@ -26,6 +26,14 @@
  * 이 프로그램만을 위한 전용 연동을 새로 만드는 대신 이미 있는 그 통로에
  * 올라타는 쪽을 택했다 — Falco 등 기존 런타임 보안 도구도 syslog를 출력
  * 채널 중 하나로 지원한다.
+ *
+ * v10: watched_parents_map/watched_self_map/suspicious_bins_map도
+ * trusted_dst_ipv4_map과 동일하게 bpffs에 핀한다. 맵이 "새로 생성되는"
+ * 경우에만(핀 경로가 아직 없을 때) 기존 PoC 기본값(raylet/ray::IDLE/
+ * python3, nc/ncat 등)을 시드로 채우고, 재시작 시에는 운영자가
+ * kshield_ctl로 바꿔둔 값을 그대로 둔다. exempt_cgroups_map은
+ * exempt_uids_map과 동일한 목적으로 핀하되(UID보다 세밀한 컨테이너/파드
+ * 단위 예외) 기본값 시드는 없다.
  */
 #include <stdio.h>
 #include <signal.h>
@@ -44,8 +52,6 @@
 
 #define MAX_COMM_LEN 16
 #define MAX_PATH_LEN 64
-#define MAX_WATCHED_PARENT 8
-#define MAX_WATCHED_SELF   8
 
 #define EVT_SHADOW_EXEC    1
 #define EVT_SHADOW_CONNECT 2
@@ -141,6 +147,31 @@ static int libbpf_print_fn(enum libbpf_print_level level, const char *fmt, va_li
     return vfprintf(stderr, fmt, args);
 }
 
+/* v10: watched_parents[]/watched_self[]가 rodata에서 BPF map으로 바뀌면서
+ * (아래 seed_str_map 주변 주석 참고), 더 이상 skel->rodata에서 판정 기준
+ * 문자열을 읽어올 수 없다. path_exists()로 맵이 "새로 생성되는" 경우인지
+ * 확인해, 그 경우에만 기존 PoC 기본값을 시드로 채운다 — 데몬이 재시작될
+ * 때는 이미 핀되어 있던 맵을 그대로 재사용하므로(libbpf의 표준 동작),
+ * 운영자가 kshield_ctl로 바꿔둔 값을 덮어쓰지 않는다. */
+static int path_exists(const char *path)
+{
+    return access(path, F_OK) == 0;
+}
+
+static const char *default_watched_parents[] = { "raylet", "ray::IDLE", "python3" };
+static const char *default_watched_self[]    = { "raylet", "ray::IDLE" };
+static const char *default_suspicious_bins[] = { "/bin/nc", "/usr/bin/nc", "/usr/bin/ncat" };
+
+static void seed_str_map(int fd, const char *const *values, int count, int key_len)
+{
+    for (int i = 0; i < count; i++) {
+        char key[MAX_PATH_LEN] = {};
+        strncpy(key, values[i], key_len - 1);
+        __u8 flag = 1;
+        bpf_map_update_elem(fd, key, &flag, BPF_ANY);
+    }
+}
+
 /*
  * v7: 데몬이 이미 실행 중인 클러스터에 나중에 붙거나(최초 기동), 크래시나
  * 업데이트로 재시작되면 ai_worker_lineage map은 빈 상태로 다시 시작한다.
@@ -152,10 +183,10 @@ static int libbpf_print_fn(enum libbpf_print_level level, const char *fmt, va_li
  *
  * 커널 BPF 프로그램을 건드리지 않고(맵 스키마·훅 로직 불변) 유저스페이스
  * 로더에서 /proc을 스캔해 이미 떠 있는 프로세스들의 계보를 동일한
- * ai_worker_lineage map에 직접 채워 넣는다. 판정 기준(watched_parents[]/
- * watched_self[])은 문자열을 여기 다시 옮겨 적지 않고 BPF 오브젝트의
- * rodata(skel->rodata)에서 그대로 읽어와, 두 목록이 조용히 어긋나는
- * 버그를 원천 차단한다.
+ * ai_worker_lineage map에 직접 채워 넣는다. 판정 기준(watched_parents_map/
+ * watched_self_map)은 v10부터 BPF map 조회로 확인한다 — rodata를 읽던
+ * 시절과 달리, 지금 이 순간 운영자가 kshield_ctl로 설정해 둔 최신 값을
+ * 그대로 따른다.
  */
 struct proc_info {
     int pid;
@@ -205,8 +236,7 @@ static int read_proc_stat(int pid, char *comm_out, int *ppid_out)
 #define MAX_ANCESTOR_DEPTH 64
 
 static void backfill_existing_lineage(int lineage_map_fd,
-                                       const char (*watched_parents)[MAX_COMM_LEN], int n_parents,
-                                       const char (*watched_self_list)[MAX_COMM_LEN], int n_self)
+                                       int watched_parents_fd, int watched_self_fd)
 {
     struct proc_info *procs = calloc(MAX_BACKFILL_PROCS, sizeof(*procs));
     if (!procs) {
@@ -244,14 +274,12 @@ static void backfill_existing_lineage(int lineage_map_fd,
     int backfilled = 0;
     for (int i = 0; i < count; i++) {
         int is_lineage = 0;
+        __u8 val;
 
-        for (int s = 0; s < n_self; s++) {
-            if (watched_self_list[s][0] != '\0' &&
-                strncmp(procs[i].comm, watched_self_list[s], MAX_COMM_LEN) == 0) {
-                is_lineage = 1;
-                break;
-            }
-        }
+        char self_key[MAX_COMM_LEN] = {};
+        memcpy(self_key, procs[i].comm, MAX_COMM_LEN);
+        if (bpf_map_lookup_elem(watched_self_fd, self_key, &val) == 0)
+            is_lineage = 1;
 
         if (!is_lineage) {
             int cur_pid = procs[i].ppid;
@@ -263,15 +291,9 @@ static void backfill_existing_lineage(int lineage_map_fd,
                 if (found_idx < 0)
                     break;
 
-                int matched = 0;
-                for (int p = 0; p < n_parents; p++) {
-                    if (watched_parents[p][0] != '\0' &&
-                        strncmp(procs[found_idx].comm, watched_parents[p], MAX_COMM_LEN) == 0) {
-                        matched = 1;
-                        break;
-                    }
-                }
-                if (matched) {
+                char parent_key[MAX_COMM_LEN] = {};
+                memcpy(parent_key, procs[found_idx].comm, MAX_COMM_LEN);
+                if (bpf_map_lookup_elem(watched_parents_fd, parent_key, &val) == 0) {
                     is_lineage = 1;
                     break;
                 }
@@ -337,11 +359,40 @@ int main(int argc, char **argv)
         fprintf(stderr, "[경고] exempt_uids_map pin 경로 설정 실패: %s\n", strerror(errno));
     }
 
+    /* v10: 네 개 맵을 추가로 핀한다. 앞의 세 개(watched_parents_map/
+     * watched_self_map/suspicious_bins_map)는 "새로 생성되는" 경우에만
+     * 기본값을 시드로 채운다 — 핀 경로가 이미 있었는지를 로드 *전에*
+     * 확인해 둬야 "새로 생성됨"인지 "기존 걸 재사용함"인지 구분할 수
+     * 있다. exempt_cgroups_map은 exempt_uids_map처럼 기본값 시드가
+     * 없다(처음엔 아무도 예외가 아님). */
+    int watched_parents_is_new = !path_exists("/sys/fs/bpf/kshield_watched_parents_v3");
+    int watched_self_is_new    = !path_exists("/sys/fs/bpf/kshield_watched_self_v3");
+    int suspicious_bins_is_new = !path_exists("/sys/fs/bpf/kshield_suspicious_bins_v3");
+
+    if (bpf_map__set_pin_path(skel->maps.watched_parents_map, "/sys/fs/bpf/kshield_watched_parents_v3"))
+        fprintf(stderr, "[경고] watched_parents_map pin 경로 설정 실패: %s\n", strerror(errno));
+    if (bpf_map__set_pin_path(skel->maps.watched_self_map, "/sys/fs/bpf/kshield_watched_self_v3"))
+        fprintf(stderr, "[경고] watched_self_map pin 경로 설정 실패: %s\n", strerror(errno));
+    if (bpf_map__set_pin_path(skel->maps.suspicious_bins_map, "/sys/fs/bpf/kshield_suspicious_bins_v3"))
+        fprintf(stderr, "[경고] suspicious_bins_map pin 경로 설정 실패: %s\n", strerror(errno));
+    if (bpf_map__set_pin_path(skel->maps.exempt_cgroups_map, "/sys/fs/bpf/kshield_exempt_cgroups_v3"))
+        fprintf(stderr, "[경고] exempt_cgroups_map pin 경로 설정 실패: %s\n", strerror(errno));
+
     err = kshield_vpatch_bpf__load(skel);
     if (err) {
         fprintf(stderr, "BPF 스켈레톤 로드 실패: %d\n", err);
         goto cleanup;
     }
+
+    if (watched_parents_is_new)
+        seed_str_map(bpf_map__fd(skel->maps.watched_parents_map), default_watched_parents,
+                     sizeof(default_watched_parents) / sizeof(default_watched_parents[0]), MAX_COMM_LEN);
+    if (watched_self_is_new)
+        seed_str_map(bpf_map__fd(skel->maps.watched_self_map), default_watched_self,
+                     sizeof(default_watched_self) / sizeof(default_watched_self[0]), MAX_COMM_LEN);
+    if (suspicious_bins_is_new)
+        seed_str_map(bpf_map__fd(skel->maps.suspicious_bins_map), default_suspicious_bins,
+                     sizeof(default_suspicious_bins) / sizeof(default_suspicious_bins[0]), MAX_PATH_LEN);
 
     err = kshield_vpatch_bpf__attach(skel);
     if (err) {
@@ -350,8 +401,8 @@ int main(int argc, char **argv)
     }
 
     backfill_existing_lineage(bpf_map__fd(skel->maps.ai_worker_lineage),
-                               skel->rodata->watched_parents, MAX_WATCHED_PARENT,
-                               skel->rodata->watched_self, MAX_WATCHED_SELF);
+                               bpf_map__fd(skel->maps.watched_parents_map),
+                               bpf_map__fd(skel->maps.watched_self_map));
 
     pb = perf_buffer__new(bpf_map__fd(skel->maps.events), 16,
                            handle_event, handle_lost, NULL, NULL);

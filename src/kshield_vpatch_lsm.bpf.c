@@ -58,58 +58,37 @@ char LICENSE[] SEC("license") = "GPL";
 #define EPERM 1
 
 #define MAX_COMM_LEN        16
-#define MAX_WATCHED_PARENT   8
-#define MAX_WATCHED_SELF     8
-#define MAX_SUSPICIOUS_BIN   8
 #define MAX_PATH_LEN         64
 
 #define EVT_LSM_EXEC_BLOCK    3
 #define EVT_LSM_CONNECT_BLOCK 4
 
-/* kshield_vpatch.bpf.c와 동일한 감시 목록. 이 파일은 독립된 BPF
- * 오브젝트이므로 맵/설정을 공유하지 않고 자체 사본을 둔다 — 메인
- * 구현과 서로 영향을 주지 않고 단독으로도 빌드·테스트 가능해야
- * 하기 때문이다.
- *
- * 주의: "자식 계보 편입용"으로만 쓰인다 — 아래 watched_self[]와
- * 의도적으로 분리되어 있다 (v6 재검토, kshield_vpatch.bpf.c 헤더 참고). */
-const volatile char watched_parents[MAX_WATCHED_PARENT][MAX_COMM_LEN] = {
-    "raylet",
-    "ray::IDLE",
-    "python3",
-};
+/* v10: kshield_vpatch.bpf.c와 동일한 재검토 — watched_parents[]/
+ * watched_self[]/suspicious_bins[]를 rodata에서 BPF map으로 전환한다
+ * (상세 근거는 그 파일 헤더 참고). 이 파일은 독립된 BPF 오브젝트이므로
+ * 맵을 공유하지 않고 자체 사본을 둔다. `kshield_ctl`이
+ * /sys/fs/bpf/kshield_{watched_parents,watched_self,suspicious_bins}_lsm에
+ * 핀된 이 맵들을 관리한다. */
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 64);
+    __type(key, char[MAX_COMM_LEN]);
+    __type(value, __u8);
+} watched_parents_map SEC(".maps");
 
-/* v6: 감시 대상 프로세스 자신이 fork 없이 직접 execve()/connect()를
- * 호출하는 경우("나 자신"이 raylet/ray::IDLE인 경우)를 잡기 위한 목록.
- * watched_parents[]에는 "python3"처럼 PoC 편의를 위한 범용적인 이름이
- * 있어 자기 자신 감시에 그대로 쓰면 무관한 다른 python3 프로세스까지
- * 오탐 대상이 될 위험이 있으므로, 실제 Ray 워커 프로세스명만 별도로
- * 담는다(상세 근거는 kshield_vpatch.bpf.c 헤더 참고). */
-const volatile char watched_self[MAX_WATCHED_SELF][MAX_COMM_LEN] = {
-    "raylet",
-    "ray::IDLE",
-};
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 64);
+    __type(key, char[MAX_COMM_LEN]);
+    __type(value, __u8);
+} watched_self_map SEC(".maps");
 
-/* v4 재검토: curl/wget은 여기 포함하지 않는다(kshield_vpatch.bpf.c와
- * 동일한 재검토 — 상세 근거는 그 파일 헤더 주석 참고). AI 워커가 모델
- * 가중치·데이터셋을 curl/wget으로 내려받는 것은 정상 운영이므로, 실행
- * 파일 이름만으로 exec 자체를 막으면 정당한 다운로드 job까지 오탐으로
- * 막는다. curl/wget의 위험 판단은 목적지를 아는 socket_connect 훅에
- * 전적으로 맡긴다 — exec은 통과시키고, 신뢰 안 된 목적지로 connect를
- * 시도할 때 그 자리에서 막는다. nc/ncat은 AI 워커 계보에서 합법적
- * 용도가 사실상 없어 exec 즉시 차단을 유지한다.
- *
- * /bin과 /usr/bin이 실제로는 같은 파일(심볼릭 링크)을 가리키는
- * 배포판(Ubuntu 등)에서도, execve()에 넘어가는 경로 문자열 자체는
- * 다르다. 쉘의 $PATH 탐색이 앞선 경로에서 거부당하면 뒤 경로로
- * 재시도하는 경우가 있어(VM 실측으로 실제 확인됨: /usr/bin/curl 거부
- * 후 /bin/curl로 재시도해 통과), 각 바이너리의 /bin, /usr/bin 두 경로
- * 모두 등록해야 한다. */
-const volatile char suspicious_bins[MAX_SUSPICIOUS_BIN][MAX_PATH_LEN] = {
-    "/bin/nc",
-    "/usr/bin/nc",
-    "/usr/bin/ncat",
-};
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 64);
+    __type(key, char[MAX_PATH_LEN]);
+    __type(value, __u8);
+} suspicious_bins_map SEC(".maps");
 
 /* v8 재검토: 신뢰 목적지 IP를 rodata 배열이 아닌 BPF map으로 관리한다
  * (kshield_vpatch.bpf.c와 동일한 재검토 — 상세 근거는 그 파일 헤더 참고).
@@ -166,33 +145,23 @@ struct {
     __type(value, __u8);
 } exempt_uids_map SEC(".maps");
 
-static __always_inline int str_eq(const char *a, const volatile char *b, int max_len)
-{
-    for (int i = 0; i < max_len; i++) {
-        if (a[i] != b[i])
-            return 0;
-        if (a[i] == '\0')
-            return 1;
-    }
-    return 1;
-}
+/* v10: kshield_vpatch.bpf.c와 동일한 재검토 — cgroup(≈컨테이너/파드)
+ * 단위 예외(상세 근거는 그 파일 헤더 참고). */
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 256);
+    __type(key, __u64);
+    __type(value, __u8);
+} exempt_cgroups_map SEC(".maps");
 
 static __always_inline int is_watched_comm(const char *comm)
 {
-    for (int i = 0; i < MAX_WATCHED_PARENT; i++) {
-        if (str_eq(comm, watched_parents[i], MAX_COMM_LEN))
-            return 1;
-    }
-    return 0;
+    return bpf_map_lookup_elem(&watched_parents_map, comm) != NULL;
 }
 
 static __always_inline int is_watched_self(const char *comm)
 {
-    for (int i = 0; i < MAX_WATCHED_SELF; i++) {
-        if (str_eq(comm, watched_self[i], MAX_COMM_LEN))
-            return 1;
-    }
-    return 0;
+    return bpf_map_lookup_elem(&watched_self_map, comm) != NULL;
 }
 
 /* v6: kshield_vpatch.bpf.c와 동일한 재검토 — "자손"만 계보에 편입되고
@@ -200,11 +169,17 @@ static __always_inline int is_watched_self(const char *comm)
  * 확인(watched_self[])으로 메운다.
  *
  * v9: exempt_uids_map에 있는 UID는 최우선으로 감시 대상에서 제외한다
- * (상세 근거는 kshield_vpatch.bpf.c 헤더 참고). */
+ * (상세 근거는 kshield_vpatch.bpf.c 헤더 참고).
+ *
+ * v10: exempt_cgroups_map도 동일하게 최우선 확인한다. */
 static __always_inline int current_is_watched(char (*parent_comm_out)[MAX_COMM_LEN])
 {
     __u32 uid = (__u32)bpf_get_current_uid_gid();
     if (bpf_map_lookup_elem(&exempt_uids_map, &uid) != NULL)
+        return 0;
+
+    __u64 cgroup_id = bpf_get_current_cgroup_id();
+    if (bpf_map_lookup_elem(&exempt_cgroups_map, &cgroup_id) != NULL)
         return 0;
 
     __u32 pid = bpf_get_current_pid_tgid() >> 32;
@@ -285,14 +260,7 @@ int BPF_PROG(kshield_lsm_bprm_check, struct linux_binprm *bprm, int ret)
     const char *fname_ptr = BPF_CORE_READ(bprm, filename);
     bpf_probe_read_kernel_str(&filename, sizeof(filename), fname_ptr);
 
-    int is_suspicious = 0;
-    for (int i = 0; i < MAX_SUSPICIOUS_BIN; i++) {
-        if (str_eq(filename, suspicious_bins[i], MAX_PATH_LEN)) {
-            is_suspicious = 1;
-            break;
-        }
-    }
-    if (!is_suspicious)
+    if (bpf_map_lookup_elem(&suspicious_bins_map, filename) == NULL)
         return 0;
 
     struct shadow_event evt = {};

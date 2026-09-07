@@ -83,77 +83,46 @@
 char LICENSE[] SEC("license") = "GPL";
 
 #define MAX_COMM_LEN        16
-#define MAX_WATCHED_PARENT   8
-#define MAX_WATCHED_SELF     8
-#define MAX_SUSPICIOUS_BIN   8
 #define MAX_PATH_LEN         64
 
 #define EVT_SHADOW_EXEC    1
 #define EVT_SHADOW_CONNECT 2
 
-/* 감시 대상 AI 워커 프로세스 이름.
- * 실 배포 시 대상 프레임워크(Ray/vLLM/Triton 등)의 실제 워커 프로세스명으로
- * 교체한다. "python3"는 본 PoC의 mock 서버(python3 mock_ray_server.py)를
- * 감시하기 위해 포함되어 있으며, 실제 Ray 배포에서는 "raylet" 등으로
- * 좁혀야 오탐을 줄일 수 있다.
+/* v10 재검토: watched_parents[]/watched_self[]/suspicious_bins[]도
+ * trusted_dst_ipv4[]와 같은 이유로 rodata 배열에서 BPF map으로 전환한다
+ * — 새 CVE 대응이나 감시 대상 프레임워크 변경(예: Ray -> Triton) 때마다
+ * 재컴파일이 필요했던 문제를 해소한다. `kshield_ctl`의
+ * parent-add/parent-del/parent-list, self-add/self-del/self-list,
+ * bin-add/bin-del/bin-list가 런타임에 관리한다. key는 문자열을
+ * MAX_COMM_LEN(또는 MAX_PATH_LEN) 바이트로 고정한 배열이며, 짧은 문자열은
+ * 뒤쪽이 0으로 채워진다 — comm/filename을 읽는 모든 코드가 이미 고정
+ * 크기 버퍼를 0으로 초기화한 뒤 채우므로(v6 이전부터의 기존 관례),
+ * 맵 키와 정확히 같은 바이트 배열이 만들어진다.
  *
- * 주의: 이 배열은 "이 이름을 가진 프로세스가 자식을 fork하면 그 자식을
- * 계보에 편입시킨다"는 용도로만 쓰인다 — 아래 watched_self[]와 의도적으로
- * 분리되어 있다 (v6 재검토 참고). */
-const volatile char watched_parents[MAX_WATCHED_PARENT][MAX_COMM_LEN] = {
-    "raylet",
-    "ray::IDLE",
-    "python3",
-};
+ * 로더(kshield_vpatch.c)는 맵이 처음 생성될 때만(핀 경로가 아직 없을 때)
+ * 기존 PoC 기본값(raylet/ray::IDLE/python3 등)을 시드로 채워 넣는다 —
+ * 재시작 시에는 건드리지 않아, 운영자가 커스터마이즈한 값을 덮어쓰지
+ * 않는다. */
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 64);
+    __type(key, char[MAX_COMM_LEN]);
+    __type(value, __u8);
+} watched_parents_map SEC(".maps");
 
-/* v6: 감시 대상 프로세스 자신이 fork 없이 직접 execve()/connect()를
- * 호출하는 경우를 잡기 위한 별도 목록. `current_is_watched()`는 원래
- * "내 직속 부모의 이름이 watched_parents[]와 일치하는가"만 확인했는데,
- * 이는 "자손"만 감시하고 감시 대상 프로세스 본인의 직접 행위는 절대
- * 계보에 편입되지 않는 구조적 공백이 있었다 — 예: raylet 자신이 fork
- * 없이 직접 소켓을 열어 통신하면 어느 훅도 이를 감지하지 못했다.
- *
- * watched_parents[]를 그대로 재사용하지 않고 별도 배열을 둔 이유:
- * watched_parents[]에는 "python3"처럼 본 PoC 편의를 위한 매우 범용적인
- * 이름이 포함되어 있는데, 이를 "자기 자신 감시"에도 그대로 쓰면 이
- * 프로그램과 무관한 다른 python3 프로세스(공유 서버의 다른 사용자
- * 스크립트 등)까지 AI 워커로 오인되어 오탐 대상이 될 위험이 있다.
- * watched_self[]는 실제 Ray 워커 프로세스명(raylet, ray::IDLE)만
- * 담아 그 위험을 배제한다. */
-const volatile char watched_self[MAX_WATCHED_SELF][MAX_COMM_LEN] = {
-    "raylet",
-    "ray::IDLE",
-};
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 64);
+    __type(key, char[MAX_COMM_LEN]);
+    __type(value, __u8);
+} watched_self_map SEC(".maps");
 
-/* AI 워커 계보(자손 프로세스)가 실행했을 때만 의심스러운 바이너리.
- * /bin/sh, /bin/bash는 정상 job 실행에도 쓰이는 경로이므로 제외한다.
- *
- * v4 재검토: curl/wget은 여기 포함하지 않는다. 실제 AI 서빙 워크로드에서
- * 워커가 모델 가중치·데이터셋을 HuggingFace/S3/사내 레지스트리 등에서
- * curl/wget으로 내려받는 것은 정상적인 운영 패턴이다 — "curl을 실행했다"
- * 자체는 목적지와 무관하게 이상 행위가 아니므로, 실행 파일 이름만으로
- * 즉시 SIGKILL하면 정당한 다운로드 job까지 오탐으로 죽인다. curl/wget의
- * 실제 위험은 "어디로 연결하는가"에 있으므로, 이 판단은 목적지를 아는
- * SHADOW_CONNECT(아래)에게 전적으로 맡긴다 — 신뢰 목적지(loopback,
- * trusted_dst_ipv4_map)로 가는 curl/wget은 exec도 connect도 통과하고,
- * 신뢰 안 된 목적지로 가면 exec은 통과해도 connect 시점에 잡힌다.
- *
- * 반면 nc/ncat은 AI 워커 계보에서 합법적으로 실행될 이유가 사실상
- * 없고(리버스/바인드 셸 용도가 대부분이며, 바인드 셸은 connect()를
- * 직접 호출하지 않아 SHADOW_CONNECT만으로는 못 잡을 수 있다), 목적지와
- * 무관하게 exec 시점 즉시 차단이 여전히 유효하다.
- *
- * /bin과 /usr/bin이 실제로는 같은 파일(심볼릭 링크)을 가리키는
- * 배포판(Ubuntu 등)에서도 execve()에 넘어가는 경로 문자열 자체는
- * 다르다. LSM 실험 컴포넌트(kshield_vpatch_lsm) 실측 중, 쉘의 $PATH
- * 탐색이 거부된 경로 대신 다른 경로 문자열로 재시도해 블록리스트를
- * 통과하는 사례가 실제로 발견되어, /bin, /usr/bin 두 경로 모두
- * 등록한다. */
-const volatile char suspicious_bins[MAX_SUSPICIOUS_BIN][MAX_PATH_LEN] = {
-    "/bin/nc",
-    "/usr/bin/nc",
-    "/usr/bin/ncat",
-};
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 64);
+    __type(key, char[MAX_PATH_LEN]);
+    __type(value, __u8);
+} suspicious_bins_map SEC(".maps");
 
 /* v8 재검토: 신뢰 목적지 IP를 rodata 배열이 아닌 BPF map으로 관리한다.
  * 클라우드 스토리지(S3, HuggingFace 등)처럼 실제 운영에서 자주 바뀌는
@@ -220,33 +189,28 @@ struct {
     __type(value, __u8);
 } exempt_uids_map SEC(".maps");
 
-static __always_inline int str_eq(const char *a, const volatile char *b, int max_len)
-{
-    for (int i = 0; i < max_len; i++) {
-        if (a[i] != b[i])
-            return 0;
-        if (a[i] == '\0')
-            return 1;
-    }
-    return 1;
-}
+/* v10: exempt_uids_map(UID 단위)에 더해 cgroup 단위 예외도 지원한다.
+ * 쿠버네티스 "네임스페이스" 자체는 커널이 아는 개념이 아니라 K8s API
+ * 서버가 관리하는 논리적 그룹이라 eBPF에서 직접 관측할 수 없다 — 그러나
+ * 컨테이너/파드 하나하나는 보통 자신만의 cgroup을 가지므로,
+ * bpf_get_current_cgroup_id()로 "이 컨테이너/파드는 예외"라는 더 세밀한
+ * 단위의 예외 처리는 가능하다. kshield_ctl cgroup-exempt-add/del/list가
+ * 관리한다. */
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 256);
+    __type(key, __u64);
+    __type(value, __u8);
+} exempt_cgroups_map SEC(".maps");
 
 static __always_inline int is_watched_comm(const char *comm)
 {
-    for (int i = 0; i < MAX_WATCHED_PARENT; i++) {
-        if (str_eq(comm, watched_parents[i], MAX_COMM_LEN))
-            return 1;
-    }
-    return 0;
+    return bpf_map_lookup_elem(&watched_parents_map, comm) != NULL;
 }
 
 static __always_inline int is_watched_self(const char *comm)
 {
-    for (int i = 0; i < MAX_WATCHED_SELF; i++) {
-        if (str_eq(comm, watched_self[i], MAX_COMM_LEN))
-            return 1;
-    }
-    return 0;
+    return bpf_map_lookup_elem(&watched_self_map, comm) != NULL;
 }
 
 /* 현재 프로세스가 AI 워커 계보에 속하는지 확인.
@@ -262,11 +226,18 @@ static __always_inline int is_watched_self(const char *comm)
  *
  * v9: exempt_uids_map에 있는 UID는 다른 조건과 무관하게 항상 감시 대상이
  * 아닌 것으로 처리한다(최우선 확인) — 오탐 시 비용이 큰 job을 실행하는
- * 검증된 사용자를 계보/자기자신 판정보다 먼저 완전히 제외시키기 위함. */
+ * 검증된 사용자를 계보/자기자신 판정보다 먼저 완전히 제외시키기 위함.
+ *
+ * v10: exempt_cgroups_map도 동일하게 최우선 확인한다 — UID보다 더 세밀한
+ * 컨테이너/파드 단위 예외가 필요한 경우를 위함. */
 static __always_inline int current_is_watched(char (*parent_comm_out)[MAX_COMM_LEN])
 {
     __u32 uid = (__u32)bpf_get_current_uid_gid();
     if (bpf_map_lookup_elem(&exempt_uids_map, &uid) != NULL)
+        return 0;
+
+    __u64 cgroup_id = bpf_get_current_cgroup_id();
+    if (bpf_map_lookup_elem(&exempt_cgroups_map, &cgroup_id) != NULL)
         return 0;
 
     __u32 pid = bpf_get_current_pid_tgid() >> 32;
@@ -335,15 +306,8 @@ int trace_shadow_exec(struct trace_event_raw_sched_process_exec *ctx)
     unsigned fname_off = ctx->__data_loc_filename & 0xFFFF;
     bpf_probe_read_kernel_str(&filename, sizeof(filename), (void *)ctx + fname_off);
 
-    /* 실행된 바이너리가 의심 목록(curl/wget/nc 등)에 있는지 확인 */
-    int is_suspicious = 0;
-    for (int i = 0; i < MAX_SUSPICIOUS_BIN; i++) {
-        if (str_eq(filename, suspicious_bins[i], MAX_PATH_LEN)) {
-            is_suspicious = 1;
-            break;
-        }
-    }
-    if (!is_suspicious)
+    /* 실행된 바이너리가 의심 목록(nc/ncat 등)에 있는지 확인 */
+    if (bpf_map_lookup_elem(&suspicious_bins_map, filename) == NULL)
         return 0;
 
     struct task_struct *task = (struct task_struct *)bpf_get_current_task();

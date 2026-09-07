@@ -21,6 +21,10 @@
  * 줄씩 남긴다(kshield_vpatch.c와 동일한 이유 — 기존 SIEM 파이프라인에
  * 올라타기 위함). exempt_uids_map도 함께 핀해, 검증된 사용자(UID) 단위로
  * 감시를 예외 처리할 수 있게 한다.
+ *
+ * v10: watched_parents_map/watched_self_map/suspicious_bins_map/
+ * exempt_cgroups_map도 핀한다(kshield_vpatch.c와 동일한 이유 — 상세
+ * 근거는 그 파일 참고).
  */
 #include <stdio.h>
 #include <signal.h>
@@ -39,8 +43,6 @@
 
 #define MAX_COMM_LEN 16
 #define MAX_PATH_LEN 64
-#define MAX_WATCHED_PARENT 8
-#define MAX_WATCHED_SELF   8
 
 #define EVT_LSM_EXEC_BLOCK    3
 #define EVT_LSM_CONNECT_BLOCK 4
@@ -169,14 +171,36 @@ static int libbpf_print_fn(enum libbpf_print_level level, const char *fmt, va_li
     return vfprintf(stderr, fmt, args);
 }
 
+/* v10: kshield_vpatch.c와 동일한 재검토 — watched_parents[]/watched_self[]가
+ * rodata에서 BPF map으로 바뀌면서, 맵이 "새로 생성되는" 경우에만 기존
+ * PoC 기본값을 시드로 채운다(상세 근거는 그 파일 참고). */
+static int path_exists(const char *path)
+{
+    return access(path, F_OK) == 0;
+}
+
+static const char *default_watched_parents[] = { "raylet", "ray::IDLE", "python3" };
+static const char *default_watched_self[]    = { "raylet", "ray::IDLE" };
+static const char *default_suspicious_bins[] = { "/bin/nc", "/usr/bin/nc", "/usr/bin/ncat" };
+
+static void seed_str_map(int fd, const char *const *values, int count, int key_len)
+{
+    for (int i = 0; i < count; i++) {
+        char key[MAX_PATH_LEN] = {};
+        strncpy(key, values[i], key_len - 1);
+        __u8 flag = 1;
+        bpf_map_update_elem(fd, key, &flag, BPF_ANY);
+    }
+}
+
 /*
  * v7: kshield_vpatch.c와 동일한 재검토 — 데몬이 이미 실행 중인 클러스터에
  * 나중에 붙거나 재시작되면 ai_worker_lineage map이 빈 상태로 시작해,
  * 데몬 기동 전부터 떠 있던 워커의 자손 프로세스는 스스로 다시 fork하기
  * 전까지 계보로 인식되지 않는다. BPF 프로그램은 그대로 두고, 유저스페이스
- * 로더가 /proc을 스캔해 동일한 map에 직접 채워 넣는다. 판정 기준은
- * skel->rodata에서 그대로 읽어 커널 쪽 목록과 어긋나지 않게 한다
- * (상세 근거는 kshield_vpatch.c 주석 참고).
+ * 로더가 /proc을 스캔해 동일한 map에 직접 채워 넣는다. 판정 기준
+ * (watched_parents_map/watched_self_map)은 v10부터 BPF map 조회로
+ * 확인한다(상세 근거는 kshield_vpatch.c 주석 참고).
  */
 struct proc_info {
     int pid;
@@ -223,8 +247,7 @@ static int read_proc_stat(int pid, char *comm_out, int *ppid_out)
 #define MAX_ANCESTOR_DEPTH 64
 
 static void backfill_existing_lineage(int lineage_map_fd,
-                                       const char (*watched_parents)[MAX_COMM_LEN], int n_parents,
-                                       const char (*watched_self_list)[MAX_COMM_LEN], int n_self)
+                                       int watched_parents_fd, int watched_self_fd)
 {
     struct proc_info *procs = calloc(MAX_BACKFILL_PROCS, sizeof(*procs));
     if (!procs) {
@@ -259,14 +282,12 @@ static void backfill_existing_lineage(int lineage_map_fd,
     int backfilled = 0;
     for (int i = 0; i < count; i++) {
         int is_lineage = 0;
+        __u8 val;
 
-        for (int s = 0; s < n_self; s++) {
-            if (watched_self_list[s][0] != '\0' &&
-                strncmp(procs[i].comm, watched_self_list[s], MAX_COMM_LEN) == 0) {
-                is_lineage = 1;
-                break;
-            }
-        }
+        char self_key[MAX_COMM_LEN] = {};
+        memcpy(self_key, procs[i].comm, MAX_COMM_LEN);
+        if (bpf_map_lookup_elem(watched_self_fd, self_key, &val) == 0)
+            is_lineage = 1;
 
         if (!is_lineage) {
             int cur_pid = procs[i].ppid;
@@ -278,15 +299,9 @@ static void backfill_existing_lineage(int lineage_map_fd,
                 if (found_idx < 0)
                     break;
 
-                int matched = 0;
-                for (int p = 0; p < n_parents; p++) {
-                    if (watched_parents[p][0] != '\0' &&
-                        strncmp(procs[found_idx].comm, watched_parents[p], MAX_COMM_LEN) == 0) {
-                        matched = 1;
-                        break;
-                    }
-                }
-                if (matched) {
+                char parent_key[MAX_COMM_LEN] = {};
+                memcpy(parent_key, procs[found_idx].comm, MAX_COMM_LEN);
+                if (bpf_map_lookup_elem(watched_parents_fd, parent_key, &val) == 0) {
                     is_lineage = 1;
                     break;
                 }
@@ -352,6 +367,21 @@ int main(int argc, char **argv)
         fprintf(stderr, "[경고] exempt_uids_map pin 경로 설정 실패: %s\n", strerror(errno));
     }
 
+    /* v10: 네 개 맵을 추가로 핀한다(kshield_vpatch.c와 동일한 이유 —
+     * 상세 근거는 그 파일 참고). */
+    int watched_parents_is_new = !path_exists("/sys/fs/bpf/kshield_watched_parents_lsm");
+    int watched_self_is_new    = !path_exists("/sys/fs/bpf/kshield_watched_self_lsm");
+    int suspicious_bins_is_new = !path_exists("/sys/fs/bpf/kshield_suspicious_bins_lsm");
+
+    if (bpf_map__set_pin_path(skel->maps.watched_parents_map, "/sys/fs/bpf/kshield_watched_parents_lsm"))
+        fprintf(stderr, "[경고] watched_parents_map pin 경로 설정 실패: %s\n", strerror(errno));
+    if (bpf_map__set_pin_path(skel->maps.watched_self_map, "/sys/fs/bpf/kshield_watched_self_lsm"))
+        fprintf(stderr, "[경고] watched_self_map pin 경로 설정 실패: %s\n", strerror(errno));
+    if (bpf_map__set_pin_path(skel->maps.suspicious_bins_map, "/sys/fs/bpf/kshield_suspicious_bins_lsm"))
+        fprintf(stderr, "[경고] suspicious_bins_map pin 경로 설정 실패: %s\n", strerror(errno));
+    if (bpf_map__set_pin_path(skel->maps.exempt_cgroups_map, "/sys/fs/bpf/kshield_exempt_cgroups_lsm"))
+        fprintf(stderr, "[경고] exempt_cgroups_map pin 경로 설정 실패: %s\n", strerror(errno));
+
     err = kshield_vpatch_lsm_bpf__load(skel);
     if (err) {
         fprintf(stderr,
@@ -359,6 +389,16 @@ int main(int argc, char **argv)
             "sudo로 실행했는지 확인하세요: %d (%s)\n", err, strerror(-err));
         goto cleanup;
     }
+
+    if (watched_parents_is_new)
+        seed_str_map(bpf_map__fd(skel->maps.watched_parents_map), default_watched_parents,
+                     sizeof(default_watched_parents) / sizeof(default_watched_parents[0]), MAX_COMM_LEN);
+    if (watched_self_is_new)
+        seed_str_map(bpf_map__fd(skel->maps.watched_self_map), default_watched_self,
+                     sizeof(default_watched_self) / sizeof(default_watched_self[0]), MAX_COMM_LEN);
+    if (suspicious_bins_is_new)
+        seed_str_map(bpf_map__fd(skel->maps.suspicious_bins_map), default_suspicious_bins,
+                     sizeof(default_suspicious_bins) / sizeof(default_suspicious_bins[0]), MAX_PATH_LEN);
 
     err = kshield_vpatch_lsm_bpf__attach(skel);
     if (err) {
@@ -370,8 +410,8 @@ int main(int argc, char **argv)
     }
 
     backfill_existing_lineage(bpf_map__fd(skel->maps.ai_worker_lineage),
-                               skel->rodata->watched_parents, MAX_WATCHED_PARENT,
-                               skel->rodata->watched_self, MAX_WATCHED_SELF);
+                               bpf_map__fd(skel->maps.watched_parents_map),
+                               bpf_map__fd(skel->maps.watched_self_map));
 
     pb = perf_buffer__new(bpf_map__fd(skel->maps.events), 16,
                            handle_event, handle_lost, NULL, NULL);
