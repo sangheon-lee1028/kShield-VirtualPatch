@@ -1,0 +1,43 @@
+# falco_vpatch_rules.yaml — kShield-VirtualPatch와 동등한 판정을 Falco 룰로 옮긴 것
+#
+# 대응 관계
+#   SHADOW_CONNECT -> "KCMP Shadow Connect"
+#       AI 워커(python3) 계보가 loopback(127.0.0.0/8)이 아닌 IPv4 목적지로 connect()
+#   SHADOW_EXEC    -> "KCMP Shadow Exec"
+#       AI 워커(python3) 계보가 nc/ncat을 exec
+#
+# 비교 시 주의
+#   - Falco는 기본적으로 탐지(알림)만 하고 프로세스를 종료하지 않는다. 차단 비교는
+#     Tetragon(Sigkill)과 하고, Falco는 오버헤드와 탐지 여부만 비교한다.
+#   - 계보는 proc.aname[N](N세대 조상의 comm)으로 표현한다. 6세대까지 확인한다.
+#   - IPv4 한정(fd.type = ipv4). 실험 시나리오가 모두 IPv4라 결과에는 영향이 없다.
+#   - Falco 0.42 이상을 전제로 한다. evt.dir(이벤트 방향) 필드는 0.42.0부터 deprecated이고
+#     이후 릴리스에서 제거되어 룰 로드 오류가 되므로 쓰지 않았다. 0.42 이상은 exit 이벤트만
+#     룰에 전달하므로 방향 조건 없이도 connect 결과 시점에 한 번만 평가된다.
+#   - 룰 문법은 Falco 버전에 따라 다를 수 있다. `falco -V <이 파일>`로 검증한다.
+
+- macro: kcmp_ai_worker_descendant
+  condition: >
+    (proc.aname[1] = python3 or proc.aname[2] = python3 or proc.aname[3] = python3 or
+     proc.aname[4] = python3 or proc.aname[5] = python3 or proc.aname[6] = python3)
+
+- rule: KCMP Shadow Connect
+  desc: AI 워커 계보가 신뢰되지 않은(loopback 외) IPv4 목적지로 연결을 시도
+  condition: >
+    evt.type = connect and fd.type = ipv4 and
+    not fd.snet in ("127.0.0.0/8") and kcmp_ai_worker_descendant
+  output: >
+    KCMP_SHADOW_CONNECT proc=%proc.name parent=%proc.pname
+    dst=%fd.sip:%fd.sport cmdline=%proc.cmdline
+  priority: WARNING
+  tags: [kcmp]
+
+- rule: KCMP Shadow Exec
+  desc: AI 워커 계보가 nc/ncat 등 합법적 용도가 없는 바이너리를 실행
+  condition: >
+    evt.type in (execve, execveat) and
+    proc.name in (nc, ncat, netcat) and kcmp_ai_worker_descendant
+  output: >
+    KCMP_SHADOW_EXEC proc=%proc.name parent=%proc.pname cmdline=%proc.cmdline
+  priority: WARNING
+  tags: [kcmp]

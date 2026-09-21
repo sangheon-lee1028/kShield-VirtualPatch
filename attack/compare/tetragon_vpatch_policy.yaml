@@ -1,0 +1,43 @@
+# tetragon_vpatch_policy.yaml — SHADOW_CONNECT와 동등한 판정을 Tetragon 정책으로 옮긴 것
+#
+# python3 계보(followChildren)가 loopback 외 목적지로 tcp_connect를 호출하면 SIGKILL.
+# kShield-VirtualPatch와 마찬가지로 커널 안에서 판정하고 비동기 SIGKILL로 제거한다.
+#
+# 비교 시 주의
+#   - SHADOW_EXEC(nc/ncat exec 차단)에 해당하는 정책은 넣지 않았다. nc도 결국
+#     connect를 호출하므로 connect 계층에서 함께 차단된다(차단 시점만 다름).
+#   - matchBinaries.values는 python3의 실제 실행 경로여야 한다. Ubuntu 22.04는
+#     /usr/bin/python3 -> python3.10 이다. `readlink -f "$(which python3)"`로 확인해
+#     아래 목록과 다르면 추가한다(run_comparison.py check가 경고한다).
+#   - 자식 프로세스 추적 필드는 followChildren이다(공식 문서 selectors 절 기준). 정책 설치
+#     이전에 만들어진 자식은 매칭되지 않으므로, run_comparison.py는 정책을 먼저 로드한 뒤
+#     mock 서버를 띄운다. 필드명이 버전에 따라 다르면 `tetra tracingpolicy add <이 파일>`의
+#     오류 메시지를 확인해 고친다.
+#   - CIDR("127.0.0.0/8")을 못 받는 버전이면 "127.0.0.1"로 바꾼다. 벤치마크는
+#     127.0.0.1로만 접속하므로 결과에는 영향이 없다.
+
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+  name: "kcmp-shadow-connect"
+spec:
+  kprobes:
+  - call: "tcp_connect"
+    syscall: false
+    args:
+    - index: 0
+      type: "sock"
+    selectors:
+    - matchBinaries:
+      - operator: "In"
+        followChildren: true
+        values:
+        - "/usr/bin/python3"
+        - "/usr/bin/python3.10"
+      matchArgs:
+      - index: 0
+        operator: "NotDAddr"
+        values:
+        - "127.0.0.0/8"
+      matchActions:
+      - action: Sigkill
