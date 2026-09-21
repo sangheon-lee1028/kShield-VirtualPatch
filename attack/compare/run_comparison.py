@@ -221,6 +221,10 @@ class Tool:
         if self.logfile:
             self.logfile.close()
 
+    def healthy(self):
+        """도구가 실험 도중 죽지 않았는지. 죽었다면 탐지 0은 '못 잡음'이 아니라 '측정 무효'다."""
+        return self.proc is None or self.proc.poll() is None
+
     def _require_alive(self):
         if self.proc.poll() is not None:
             die(f"{self.name}이(가) 기동 직후 종료되었습니다(종료 코드 {self.proc.returncode}). "
@@ -300,16 +304,41 @@ class Tetragon(Tool):
     def tetra(self, *rest):
         return [self.args.tetra_bin] + shlex.split(self.args.tetra_extra) + list(rest)
 
+    def healthy(self):
+        return self.events_proc is None or self.events_proc.poll() is None
+
+    def _socket_path(self):
+        m = re.search(r"unix://(\S+)", self.args.tetra_extra)
+        return m.group(1) if m else None
+
+    def _start_events(self):
+        """이벤트 스트림을 띄운다. 소켓이 아직 없으면 tetra가 곧바로 종료하므로,
+        살아 있는 것을 확인할 때까지 재시도한다(죽은 스트림은 탐지 0으로 조용히 기록되기 때문)."""
+        self.logpath = os.path.join(self.logdir, "tetragon_events.log")
+        for _ in range(5):
+            open(self.logpath, "wb").close()  # 이전 시도의 오류 메시지를 비운다
+            self.events_proc, self.events_file = spawn(self.tetra("getevents", "-o", "json"), self.logpath)
+            time.sleep(1.5)
+            if self.events_proc.poll() is None:
+                return
+            self.events_file.close()
+            time.sleep(1)
+        tail = self.tail()
+        self.stop()
+        die(f"tetra getevents 스트림을 5회 시도해도 유지되지 않았습니다. 로그:\n{tail}")
+
     def start(self):
         svc = self.args.tetragon_service
         r = run(["systemctl", "start", svc])
         if r.returncode != 0:
             die(f"systemctl start {svc} 실패: {r.stderr.strip()}")
+        sock = self._socket_path()
         ready = False
         end = time.time() + 40
         while time.time() < end and not ready:
-            ready = any(run(self.tetra(*c), timeout=10).returncode == 0
-                        for c in (("status",), ("tracingpolicy", "list")))
+            ready = (sock is None or os.path.exists(sock)) and any(
+                run(self.tetra(*c), timeout=10).returncode == 0
+                for c in (("status",), ("tracingpolicy", "list")))
             if not ready:
                 time.sleep(1)
         if not ready:
@@ -320,9 +349,7 @@ class Tetragon(Tool):
         self._pid = int(pid) if pid.isdigit() and int(pid) > 0 else None
 
         if self.capture_events:
-            self.logpath = os.path.join(self.logdir, "tetragon_events.log")
-            self.events_proc, self.events_file = spawn(self.tetra("getevents", "-o", "json"), self.logpath)
-            time.sleep(1)
+            self._start_events()
 
         r = run(self.tetra("tracingpolicy", "add", TETRAGON_POLICY))
         if r.returncode != 0:
@@ -672,6 +699,9 @@ def cmd_detect(args):
                         rc = wait_result(resfile, args.scenario_timeout)
                         time.sleep(args.settle)
                         acc1, bytes1 = sink.snapshot()
+                        if not tool.healthy():
+                            die(f"{group}: 실험 도중 도구(또는 이벤트 스트림)가 종료되어 이 그룹의 결과는 "
+                                f"무효입니다. 로그 끝부분:\n{tool.tail()}")
                         new = tool.read_log_from(offset)
                         detected = any(m in new for m in tool.markers)
                         killed = rc == 137
