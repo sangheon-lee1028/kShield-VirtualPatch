@@ -9,9 +9,25 @@ Tetragon 정책으로 옮겨, 같은 VM·같은 워크로드에서 성능과 탐
 | 파일 | 역할 |
 |---|---|
 | `falco_vpatch_rules.yaml` | SHADOW_CONNECT/SHADOW_EXEC 동등 Falco 룰 (탐지 전용) |
+| `falco_norules.yaml` | `falco_norules` 대조군용 — 결코 발동하지 않는 더미 룰 1개만 있음 |
 | `tetragon_vpatch_policy.yaml` | SHADOW_CONNECT 동등 Tetragon 정책 (Sigkill) |
 | `run_comparison.py` | `check` / `detect` / `perf` 실행기 |
 | `compare_stats.py` | Welch t-test, Bonferroni, 평균 차이 95% CI, TOST 동등성 검정 |
+
+## 오버헤드 원인 분리 (falco_norules / tetragon_norules)
+
+4.5절에서 관측된 Falco/Tetragon의 오버헤드가 우리가 이식한 룰 2개(특히 조상 프로세스를
+6단계까지 훑는 `proc.aname[1..6]`) 자체의 비용인지, 에이전트가 정책과 무관하게 상시
+수행하는 기반 관측 비용인지는 이전 실험 설계로 분리되지 않았다(5장 향후 연구).
+`falco_norules`는 Falco를 결코 매칭되지 않는 더미 룰 하나로, `tetragon_norules`는
+Tetragon을 TracingPolicy 없이(에이전트만) 띄운다 — 둘 다 이벤트 스트림 자체는 켜져
+있으므로, 이 두 그룹의 RSS/CPU가 `falco`/`tetragon`과 비슷하면 (B) 에이전트 기반 비용이,
+크게 낮아지면 (A) 룰 매칭 비용이 오버헤드의 주 원인이라고 해석할 수 있다.
+
+```bash
+sudo python3 attack/compare/run_comparison.py perf --runs 20 --rounds 4 \
+  --groups off,falco,falco_norules,tetragon,tetragon_norules
+```
 
 ## 준비 (VM)
 

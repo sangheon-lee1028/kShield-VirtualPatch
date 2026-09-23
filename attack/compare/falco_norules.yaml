@@ -1,0 +1,20 @@
+# falco_norules.yaml — falco_norules 그룹(대조군)에서 쓰는 룰 파일.
+#
+# 목적: 4.5절 비교 실험에서 관측된 Falco/Tetragon의 오버헤드가 우리가 이식한
+# 룰 2개(KCMP Shadow Connect/Exec, 특히 조상 프로세스를 6단계까지 훑는
+# proc.aname[1..6])의 비용인지, 에이전트 자체의 기반 비용(modern eBPF 드라이버
+# 이벤트 스트림 수신 + 엔진 구동)인지 분리한다.
+#
+# 완전히 빈 파일(룰 0개)은 일부 Falco 버전이 "이 파일에 룰이 없다"고 거부할 수
+# 있어, 결코 참이 되지 않는 더미 룰 하나만 둔다. proc.pid는 항상 양수이므로
+# 이 조건은 이론상으로도 실제로도 절대 발동하지 않는다 — 즉 알림은 0건이어야
+# 정상이다. 이벤트 스트림 자체(드라이버가 받는 이벤트 종류·양)는
+# falco_vpatch_rules.yaml을 쓰는 falco 그룹과 동일하다.
+
+- rule: KCMP Never Fires (control group placeholder)
+  desc: 대조군용 더미 룰 — proc.pid가 음수일 수 없으므로 결코 발동하지 않는다
+  condition: proc.pid = -1
+  output: >
+    이 메시지가 보이면 안 됨(대조군 오작동) pid=%proc.pid
+  priority: WARNING
+  tags: [kcmp, control]

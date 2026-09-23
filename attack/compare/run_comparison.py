@@ -47,13 +47,15 @@ import stat_analysis  # noqa: E402  (run_once 재사용)
 
 MOCK_SERVER = os.path.join(ATTACK_DIR, "mock_ray_server.py")
 FALCO_RULES = os.path.join(HERE, "falco_vpatch_rules.yaml")
+FALCO_NORULES_RULES = os.path.join(HERE, "falco_norules.yaml")
 TETRAGON_POLICY = os.path.join(HERE, "tetragon_vpatch_policy.yaml")
 TETRAGON_POLICY_NAME = "kcmp-shadow-connect"
 KSHIELD_BIN = os.path.join(REPO_ROOT, "src", "kshield_vpatch")
 KSHIELD_CTL = os.path.join(REPO_ROOT, "src", "kshield_ctl")
 
 DEFAULT_GROUPS = "off,kshield,falco,tetragon"
-ALL_GROUPS = ["off", "kshield", "falco", "falco_default", "tetragon"]
+ALL_GROUPS = ["off", "kshield", "falco", "falco_default", "falco_norules",
+              "tetragon", "tetragon_norules"]
 STRAY_PROCESS_NAMES = ["falco", "tetragon", "kshield_vpatch", "kshield_vpatch_lsm"]
 
 RAW_FIELDS = ["workload", "round", "group", "run", "throughput_rps", "latency_mean_ms",
@@ -292,9 +294,24 @@ class FalcoDefault(Falco):
         return self.args.falco_default_rules
 
 
+class FalcoNoRules(Falco):
+    """활성 룰이 없는(대조군) Falco — 에이전트 기반 비용과 룰 매칭 비용을 분리한다.
+    완전히 빈 룰 파일 대신, 결코 참이 되지 않는 더미 룰 하나만 둔다(일부 Falco
+    버전이 룰 0개인 파일을 거부할 수 있어 우회). modern eBPF 드라이버가 받는
+    이벤트 스트림 자체는 falco 그룹과 동일하며, KCMP_SHADOW_* 두 룰의 조상
+    프로세스 탐색(proc.aname[1..6])만 빠진다."""
+    name = "falco_norules"
+    markers = []
+
+    def rules_path(self):
+        return FALCO_NORULES_RULES
+
+
 class Tetragon(Tool):
     name = "tetragon"
     markers = [TETRAGON_POLICY_NAME]
+    policy_path = TETRAGON_POLICY
+    policy_name = TETRAGON_POLICY_NAME
 
     def __init__(self, *a, **kw):
         super().__init__(*a, **kw)
@@ -351,24 +368,36 @@ class Tetragon(Tool):
         if self.capture_events:
             self._start_events()
 
-        r = run(self.tetra("tracingpolicy", "add", TETRAGON_POLICY))
-        if r.returncode != 0:
-            self.stop()
-            die("Tetragon 정책 로드 실패 — 정책 파일 필드명을 확인하세요:\n"
-                f"{r.stdout}{r.stderr}")
+        if self.policy_path:
+            r = run(self.tetra("tracingpolicy", "add", self.policy_path))
+            if r.returncode != 0:
+                self.stop()
+                die("Tetragon 정책 로드 실패 — 정책 파일 필드명을 확인하세요:\n"
+                    f"{r.stdout}{r.stderr}")
         time.sleep(self.args.tool_warmup)
 
     def stop(self):
         terminate(self.events_proc)
         if self.events_file:
             self.events_file.close()
-        run(self.tetra("tracingpolicy", "delete", TETRAGON_POLICY_NAME), timeout=15)
+        if self.policy_name:
+            run(self.tetra("tracingpolicy", "delete", self.policy_name), timeout=15)
         run(["systemctl", "stop", self.args.tetragon_service], timeout=60)
+
+
+class TetragonNoPolicy(Tetragon):
+    """TracingPolicy를 전혀 로드하지 않는(대조군) Tetragon — 에이전트가 정책과
+    무관하게 기본으로 수행하는 프로세스 생명주기 관찰 비용만 측정한다."""
+    name = "tetragon_norules"
+    markers = []
+    policy_path = None
+    policy_name = None
 
 
 def make_tool(group, args, logdir, capture_events=False):
     table = {"off": Tool, "kshield": KShield, "falco": Falco,
-             "falco_default": FalcoDefault, "tetragon": Tetragon}
+             "falco_default": FalcoDefault, "falco_norules": FalcoNoRules,
+             "tetragon": Tetragon, "tetragon_norules": TetragonNoPolicy}
     return table[group](args, logdir, capture_events)
 
 
@@ -507,16 +536,20 @@ def preflight(args, groups):
         if not shutil.which(args.falco_bin):
             problems.append("falco 바이너리를 찾을 수 없음 (https://falco.org/docs/ 설치 문서 참고)")
         else:
-            r = run([args.falco_bin, "-V", FALCO_RULES], timeout=60)
-            if r.returncode != 0:
-                log(f"[경고] falco -V 룰 검증이 0이 아닌 코드로 끝남:\n{r.stdout}{r.stderr}")
+            for rules_file in {FALCO_RULES} | ({FALCO_NORULES_RULES} if "falco_norules" in groups else set()):
+                r = run([args.falco_bin, "-V", rules_file], timeout=60)
+                if r.returncode != 0:
+                    log(f"[경고] falco -V 룰 검증이 0이 아닌 코드로 끝남({rules_file}):\n{r.stdout}{r.stderr}")
     if "falco_default" in groups and not os.path.isfile(args.falco_default_rules):
         problems.append(f"Falco 기본 룰 파일 없음: {args.falco_default_rules}")
-    if "tetragon" in groups:
+    if "falco_norules" in groups and not os.path.isfile(FALCO_NORULES_RULES):
+        problems.append(f"{FALCO_NORULES_RULES} 없음")
+    if any(g.startswith("tetragon") for g in groups):
         if not shutil.which(args.tetra_bin):
             problems.append("tetra CLI를 찾을 수 없음 (https://tetragon.io/docs/ 설치 문서 참고)")
         if run(["systemctl", "cat", args.tetragon_service]).returncode != 0:
             problems.append(f"systemd 서비스 '{args.tetragon_service}' 없음")
+    if "tetragon" in groups:
         if not os.path.isfile(TETRAGON_POLICY):
             problems.append(f"{TETRAGON_POLICY} 없음")
         else:
@@ -549,7 +582,7 @@ def collect_meta(args, groups):
     }
     if any(g.startswith("falco") for g in groups):
         meta["falco_version"] = sh([args.falco_bin, "--version"])
-    if "tetragon" in groups:
+    if any(g.startswith("tetragon") for g in groups):
         meta["tetra_version"] = sh([args.tetra_bin, "version"])
     return meta
 
