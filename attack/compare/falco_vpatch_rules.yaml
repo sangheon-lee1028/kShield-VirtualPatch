@@ -2,9 +2,14 @@
 #
 # 대응 관계
 #   SHADOW_CONNECT -> "KCMP Shadow Connect"
-#       AI 워커(python3) 계보가 loopback(127.0.0.0/8)이 아닌 IPv4 목적지로 connect()
+#       AI 워커 계보가 loopback(127.0.0.0/8)이 아닌 IPv4 목적지로 connect()
 #   SHADOW_EXEC    -> "KCMP Shadow Exec"
-#       AI 워커(python3) 계보가 nc/ncat을 exec
+#       AI 워커 계보가 nc/ncat을 exec
+#
+# kcmp_ai_worker_names는 4.6절 다른 CVE·프레임워크 일반화 검증에서 kshield_ctl
+# parent-add로 런타임에 등록한 이름(torchserve/mlflow/tritonserver/vllm/bentoml/
+# gradio/textgenwebui)을 그대로 옮긴 것이다 — kShield 쪽은 재컴파일 없이 맵에
+# 추가하지만, Falco는 룰 파일을 고쳐 falco를 재시작해야 반영된다는 차이가 있다.
 #
 # 비교 시 주의
 #   - Falco는 기본적으로 탐지(알림)만 하고 프로세스를 종료하지 않는다. 차단 비교는
@@ -16,10 +21,14 @@
 #     룰에 전달하므로 방향 조건 없이도 connect 결과 시점에 한 번만 평가된다.
 #   - 룰 문법은 Falco 버전에 따라 다를 수 있다. `falco -V <이 파일>`로 검증한다.
 
+- list: kcmp_ai_worker_names
+  items: [python3, torchserve, mlflow, tritonserver, vllm, bentoml, gradio, textgenwebui]
+
 - macro: kcmp_ai_worker_descendant
   condition: >
-    (proc.aname[1] = python3 or proc.aname[2] = python3 or proc.aname[3] = python3 or
-     proc.aname[4] = python3 or proc.aname[5] = python3 or proc.aname[6] = python3)
+    (proc.aname[1] in (kcmp_ai_worker_names) or proc.aname[2] in (kcmp_ai_worker_names) or
+     proc.aname[3] in (kcmp_ai_worker_names) or proc.aname[4] in (kcmp_ai_worker_names) or
+     proc.aname[5] in (kcmp_ai_worker_names) or proc.aname[6] in (kcmp_ai_worker_names))
 
 - rule: KCMP Shadow Connect
   desc: AI 워커 계보가 신뢰되지 않은(loopback 외) IPv4 목적지로 연결을 시도

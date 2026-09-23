@@ -36,6 +36,16 @@ spec:
         - "/usr/bin/python3"
         - "/usr/bin/python3.10"
         - "/usr/bin/python3.12"
+        # 4.6절 다른 CVE·프레임워크 일반화 검증용 — kshield_ctl parent-add로
+        # kShield 쪽에 런타임 등록한 이름과 짝을 맞춘, 이름을 바꾼 python3
+        # 인터프리터 경로들이다(cp "$(which python3)" /tmp/<name>).
+        - "/tmp/torchserve"
+        - "/tmp/mlflow"
+        - "/tmp/tritonserver"
+        - "/tmp/vllm"
+        - "/tmp/bentoml"
+        - "/tmp/gradio"
+        - "/tmp/textgenwebui"
       matchArgs:
       - index: 0
         operator: "NotDAddr"
