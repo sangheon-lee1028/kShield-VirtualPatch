@@ -54,7 +54,8 @@ def load_raw(path):
     with open(path, newline="", encoding="utf-8") as f:
         for r in csv.DictReader(f):
             d = data.setdefault((r["workload"], r["group"]),
-                                {"thr": [], "lat": [], "p99": [], "cpu": [], "rss": [], "fail": 0})
+                                {"thr": [], "lat": [], "p99": [], "cpu": [], "rss": [],
+                                 "read_b": [], "write_b": [], "rchar_b": [], "wchar_b": [], "fail": 0})
             d["thr"].append(float(r["throughput_rps"]))
             d["lat"].append(float(r["latency_mean_ms"]))
             d["p99"].append(float(r["latency_p99_ms"]))
@@ -62,6 +63,10 @@ def load_raw(path):
                 d["cpu"].append(float(r["tool_cpu_s"]))
             if r.get("tool_rss_kb"):
                 d["rss"].append(float(r["tool_rss_kb"]))
+            for csv_key, dict_key in (("tool_read_bytes", "read_b"), ("tool_write_bytes", "write_b"),
+                                       ("tool_rchar_b", "rchar_b"), ("tool_wchar_b", "wchar_b")):
+                if r.get(csv_key):
+                    d[dict_key].append(float(r[csv_key]))
             d["fail"] += int(float(r.get("failures") or 0))
     return data
 
@@ -163,6 +168,20 @@ def main():
             cpu = f"{statistics.mean(d['cpu']):.3f}" if d["cpu"] else "-"
             rss = f"{statistics.mean(d['rss']) / 1024:.0f}" if d["rss"] else "-"
             print(f"{g:<14}{fmt_ms(d['p99'], 3):<20}{cpu:<14}{rss:<12}{d['fail']}")
+
+        print("\n[참고: 도구 자신의 디스크 I/O · 전체 read/write 바이트 (런당 평균, KB)]")
+        print(f"{'그룹':<14}{'디스크 read':<14}{'디스크 write':<14}{'rchar(전체)':<16}{'wchar(전체)':<16}")
+        for g in [args.baseline] + others:
+            d = data.get((wl, g))
+            if not d:
+                continue
+
+            def _kb(key):
+                return f"{statistics.mean(d[key]) / 1024:,.1f}" if d.get(key) else "-"
+
+            print(f"{g:<14}{_kb('read_b'):<14}{_kb('write_b'):<14}{_kb('rchar_b'):<16}{_kb('wchar_b'):<16}")
+        print("  (rchar/wchar은 소켓·파이프·디스크가 섞인 read()/write() 총량이다 — "
+              "네트워크만 분리한 값이 아니다.)")
 
     with open(out_path, "w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=list(summary[0].keys()))

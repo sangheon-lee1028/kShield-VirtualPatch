@@ -20,6 +20,11 @@ run_comparison.py — kShield-VirtualPatch vs Falco vs Tetragon 비교 실험 �
   - 그룹 순서는 라운드마다 뒤집는다(ABBA). 시간에 따른 시스템 드리프트를 상쇄한다.
   - tool_cpu_s는 사용자 공간 에이전트가 쓴 CPU 시간이다. BPF 프로그램 자체의
     실행 시간은 트리거한 프로세스에 계상되므로 처리량/지연에 반영된다.
+  - tool_read_bytes/tool_write_bytes는 /proc/{pid}/io의 read_bytes/write_bytes(런 사이의
+    델타) — 도구 자신이 실제로 스토리지에서 읽고 쓴 바이트(디스크 I/O)다.
+  - tool_rchar_b/tool_wchar_b는 같은 파일의 rchar/wchar 델타 — read()/write() 시스템
+    콜에 오간 총 바이트로, 소켓·파이프·디스크가 섞여 있어 네트워크 I/O만 분리하지는
+    못한다. 순수 네트워크 바이트가 필요하면 별도로 nethogs 등을 써야 한다.
 """
 import argparse
 import csv
@@ -59,7 +64,8 @@ ALL_GROUPS = ["off", "kshield", "falco", "falco_default", "falco_norules",
 STRAY_PROCESS_NAMES = ["falco", "tetragon", "kshield_vpatch", "kshield_vpatch_lsm"]
 
 RAW_FIELDS = ["workload", "round", "group", "run", "throughput_rps", "latency_mean_ms",
-              "latency_p99_ms", "failures", "tool_cpu_s", "tool_rss_kb"]
+              "latency_p99_ms", "failures", "tool_cpu_s", "tool_rss_kb",
+              "tool_read_bytes", "tool_write_bytes", "tool_rchar_b", "tool_wchar_b"]
 
 # (이름, 공격 여부, entrypoint 템플릿). {ip}:{port}는 신뢰되지 않은 목적지(Sink)다.
 SCENARIO_TEMPLATES = [
@@ -145,6 +151,32 @@ def rss_kb(pid):
     return float("nan")
 
 
+def io_counters(pid):
+    """/proc/{pid}/io의 누적 카운터. read_bytes/write_bytes는 실제 스토리지(디스크) I/O이고,
+    rchar/wchar는 read()/write() 시스템 콜에 오간 바이트 수로 소켓·파이프·디스크가 섞여 있다
+    — 네트워크 I/O만 따로 떼어내는 값은 아니며, "디스크 I/O + 그 밖의 read/write 총량"에
+    대한 근사치로만 쓴다(4.5절 자원 비교 확장, 한계는 결과에 함께 기록한다)."""
+    d = {"rchar": float("nan"), "wchar": float("nan"),
+         "read_bytes": float("nan"), "write_bytes": float("nan")}
+    try:
+        with open(f"/proc/{pid}/io") as f:
+            for line in f:
+                k, _, v = line.partition(":")
+                k = k.strip()
+                if k in d:
+                    d[k] = int(v.strip())
+    except (OSError, ValueError):
+        pass
+    return d
+
+
+def io_delta(before, after, key):
+    x, y = before.get(key), after.get(key)
+    if x != x or y != y:  # NaN
+        return ""
+    return round(y - x)
+
+
 def spawn(cmd, logpath):
     lf = open(logpath, "ab", buffering=0)
     proc = subprocess.Popen(cmd, stdout=lf, stderr=subprocess.STDOUT, start_new_session=True)
@@ -212,6 +244,9 @@ class Tool:
 
     def rss(self):
         return rss_kb(self._pid) if self._pid else float("nan")
+
+    def io(self):
+        return io_counters(self._pid) if self._pid else io_counters(-1)
 
     def _spawn(self, cmd, logname):
         self.logpath = os.path.join(self.logdir, logname)
@@ -638,9 +673,11 @@ def cmd_perf(args):
                         for i in range(per_block):
                             out = os.path.join(runs_dir, f"{workload}_{group}_r{rnd + 1}_{i + 1}.csv")
                             cpu0 = tool.cpu_s()
+                            io0 = tool.io()
                             s = stat_analysis.run_once(args.host, args.port, args.count, out,
                                                        fork_heavy=fork_heavy)
                             cpu1 = tool.cpu_s()
+                            io1 = tool.io()
                             row = {
                                 "workload": workload, "round": rnd + 1, "group": group,
                                 "run": rnd * per_block + i + 1,
@@ -650,6 +687,10 @@ def cmd_perf(args):
                                 "failures": int(s.get("failure", 0)),
                                 "tool_cpu_s": round(cpu1 - cpu0, 3) if cpu1 == cpu1 else "",
                                 "tool_rss_kb": tool.rss() if tool.pid() else "",
+                                "tool_read_bytes": io_delta(io0, io1, "read_bytes"),
+                                "tool_write_bytes": io_delta(io0, io1, "write_bytes"),
+                                "tool_rchar_b": io_delta(io0, io1, "rchar"),
+                                "tool_wchar_b": io_delta(io0, io1, "wchar"),
                             }
                             with open(raw_path, "a", newline="", encoding="utf-8") as f:
                                 csv.DictWriter(f, fieldnames=RAW_FIELDS).writerow(row)
