@@ -677,7 +677,27 @@ Falco 쪽 결과는 애초 세운 가설("룰을 걷어내면 가벼워질 것")
 
 TorchServe·Triton의 3단계 계보(`torchserve`/`tritonserver` → python3 워커·스텁 → sh → nc)는 ShadowRay의 2단계 계보(`raylet → sh → curl`)보다 한 단계 더 깊은데도 `ai_worker_lineage` 추적이 끊기지 않았다. MLflow는 악성 아티팩트를 올린 직후 `journalctl` 조회에서 이벤트가 전혀 없었고(대조군), 로드 요청을 보낸 시점에만 탐지되었다 — 데이터가 존재하는 것과 그 데이터로 인해 실제 행위가 발생하는 것을 정확히 구분함을 확인하였다. vLLM·text-generation-webui는 애플리케이션 계층의 안전장치(`trust_remote_code`)가 우회되었든(vLLM) 애초에 노출되었든(text-generation-webui) 똑같이 탐지되었다 — SHADOW_EXEC/SHADOW_CONNECT는 그 안전장치가 실제로 작동했는지와 무관하게, 안전장치를 통과한 뒤의 행위만 보고 판단하기 때문이다. Gradio는 취약점의 형태 자체가 "모델 로딩"이 아닌 "임의 메서드 호출"이었는데도 결과가 동일한 exec/connect 행위로 귀결되는 한 똑같이 잡혔다 — 탐지가 공격 벡터의 종류가 아니라 그 결과 행위만 본다는 설계 의도(3.3절)를 다시 확인해 준다.
 
-**한계 (반드시 함께 읽을 것)**: (1) 각 시나리오 **1회씩만** 실행한 기능적 확인이며, 4.3절(N=10)·4.4절(N=10)·4.5절(N=20) 같은 반복 통계 측정은 하지 않았다. (2) Falco·Tetragon과의 비교도 하지 않았다 — kShield-VirtualPatch 자신이 막는지만 확인하였다. (3) 일곱 취약점 모두 실제 프레임워크를 설치하지 않고 목업으로 핵심 동작만 재현하였다(3.1절의 Ray 토큰 인증 검증만 예외적으로 실제 설치본을 썼다). (4) 일곱 사례 모두 최종적으로 의심 바이너리 실행(SHADOW_EXEC, `nc`)으로 귀결되도록 구성하였다 — SHADOW_CONNECT(신뢰 안 된 목적지 connect) 경로나, exec/connect 어느 쪽으로도 안 드러나는 공격 형태(3.3절 한계에 이미 명시한 기존 연결 재사용, 로컬 전용 공격 등)는 이번 예비 실험에 포함되지 않았다. (5) Gradio의 경우 공개된 실제 공격은 파일 읽기이며, 코드 실행으로 이어지는 구체적 메서드는 공개돼 있지 않다 — "임의 메서드 호출이 가능하다"는 원시적 능력만 실측하고, 그 능력이 셸 명령 실행으로 이어지는 구간은 payload_cmd로 직접 단순화하였다. 따라서 이 절의 결론은 "**같은 커널 로직이 형태·노출 조건이 서로 다른 최소 일곱 개의 CVE에도 런타임 등록만으로 작동함을 확인**"까지이며, "임의의 CVE를 다 막는다"는 주장으로 확장해서는 안 된다.
+#### 4.6.1 Falco·Tetragon과의 탐지 비교
+
+이어서 같은 일곱 사례에 대해 Falco 룰(`kcmp_ai_worker_names` 목록에 일곱 이름 추가)과 Tetragon 정책(`matchBinaries`에 일곱 경로 추가)도 동일하게 확장해, kShield-VirtualPatch를 정지한 독립된 세션에서 두 도구가 각각 탐지·차단하는지 확인하였다(§4.5의 "한 번에 한 도구만 켠다" 원칙과 동일). 표16과 달리 이번에는 신뢰 안 된 목적지로의 실제 connect까지 발생시키는 명령(`nc -w 2 203.0.113.1 80` — 203.0.113.0/24는 RFC 5737 문서화 전용 예약 대역)을 썼다. SHADOW_CONNECT/Tetragon의 connect 계층까지 함께 확인하기 위해서다.
+
+**[표17] Falco·Tetragon 탐지 비교 (N=1, connect 포함 시나리오)**
+
+| 프레임워크 | Falco | Tetragon |
+|---|---|---|
+| TorchServe | KCMP_SHADOW_EXEC·CONNECT 탐지 | connect 탐지 → SIGKILL |
+| MLflow | KCMP_SHADOW_EXEC·CONNECT 탐지 | connect 탐지 → SIGKILL |
+| Triton | KCMP_SHADOW_EXEC·CONNECT 탐지 | connect 탐지 → SIGKILL |
+| vLLM | KCMP_SHADOW_EXEC·CONNECT 탐지 | connect 탐지 → SIGKILL |
+| BentoML | KCMP_SHADOW_EXEC·CONNECT 탐지 | connect 탐지 → SIGKILL |
+| Gradio | KCMP_SHADOW_EXEC·CONNECT 탐지 | connect 탐지 → SIGKILL |
+| text-generation-webui | KCMP_SHADOW_EXEC·CONNECT 탐지 | connect 탐지 → SIGKILL |
+
+일곱 사례 모두 Falco·Tetragon 둘 다 탐지했다 — 두 도구도 "새 프레임워크 이름을 목록에 추가"하는 것만으로 일반화된다는 뜻이다. 다만 그 추가 방식에는 차이가 있었다. kShield-VirtualPatch(`kshield_ctl parent-add`)와 Tetragon(`tetra tracingpolicy add`)은 **에이전트를 재시작하지 않고** 새 정책을 반영했다. Falco는 이번 실험이 쓴 기동 방식(룰 파일을 인자로 받아 기동)에서는 **프로세스 자체를 재시작**해야 새 룰이 반영되었다 — Falco가 룰 갱신을 아예 못 하는 것은 아니지만(운영 배포에서는 재적재 메커니즘이 있다), 이 실험 설정에서는 재시작이 필요했다는 점만 사실로 기록한다.
+
+**이 라운드와 표16의 차이(정직하게 밝힘)**: 표16은 kShield-VirtualPatch 혼자, `nc -h`(exec만 발생, connect 없음)로 확인한 결과다. 이번 라운드는 kShield-VirtualPatch를 정지한 채 Falco·Tetragon만, connect까지 발생하는 다른 명령으로 확인했다 — **세 도구를 동일한 한 번의 실행으로 나란히 비교한 것이 아니다.** kShield-VirtualPatch 자신의 SHADOW_CONNECT가 이 일곱 프레임워크에서도 작동하는지는 이번 라운드에서 재확인하지 않았다 — 같은 커널 코드가 원본 ShadowRay 실험(§4.3·§4.5)에서 SHADOW_CONNECT까지 이미 검증되었고 계보 판정이 SHADOW_EXEC와 동일한 `ai_worker_lineage` 맵을 공유하므로 작동할 것으로 추정되나, 실측으로 확인한 것은 아니다.
+
+**한계 (반드시 함께 읽을 것)**: (1) 표16의 각 시나리오는 **1회씩만** 실행한 기능적 확인이며, 4.6.1절의 Falco·Tetragon 비교도 마찬가지로 1회씩이다 — 4.3절(N=10)·4.4절(N=10)·4.5절(N=20) 같은 반복 통계 측정은 어느 쪽도 하지 않았다. (2) 4.6.1절에서 Falco·Tetragon의 탐지 여부는 확인했지만, 오버헤드·성능 비교(§4.5 수준)는 하지 않았다. (3) 일곱 취약점 모두 실제 프레임워크를 설치하지 않고 목업으로 핵심 동작만 재현하였다(3.1절의 Ray 토큰 인증 검증만 예외적으로 실제 설치본을 썼다). (4) 표16의 일곱 사례는 의심 바이너리 실행(SHADOW_EXEC, `nc`)으로만 구성했다 — SHADOW_CONNECT 경로는 4.6.1절에서 Falco·Tetragon에 대해서만 별도로 확인했고, kShield-VirtualPatch 자신에 대해서는 이번 예비 실험에서 재확인하지 않았다(위 설명 참고). exec/connect 어느 쪽으로도 안 드러나는 공격 형태(3.3절 한계에 이미 명시한 기존 연결 재사용, 로컬 전용 공격 등)는 포함되지 않았다. (5) Gradio의 경우 공개된 실제 공격은 파일 읽기이며, 코드 실행으로 이어지는 구체적 메서드는 공개돼 있지 않다 — "임의 메서드 호출이 가능하다"는 원시적 능력만 실측하고, 그 능력이 셸 명령 실행으로 이어지는 구간은 payload_cmd로 직접 단순화하였다. 따라서 이 절의 결론은 "**같은 커널 로직(kShield)과 같은 방식으로 확장한 룰/정책(Falco·Tetragon)이 형태·노출 조건이 서로 다른 최소 일곱 개의 CVE에도 이름·경로 등록만으로 작동함을 확인**"까지이며, "임의의 CVE를 다 막는다"는 주장이나 세 도구 간 성능·정밀 비교로 확장해서는 안 된다.
 
 ---
 
@@ -711,7 +731,7 @@ Falco·Tetragon에 같은 판정을 이식해 같은 VM·세션에서 비교한 
 - **Falco "무룰 시 오버헤드 증가" 기전 규명**: 4.5.1절의 대조군 실험(falco_norules/tetragon_norules)으로 Tetragon의 오버헤드는 정책 내용과 무관한 에이전트 기반 비용이며, kShield-VirtualPatch의 경량성이 AI 서버 전용으로 좁게 쓴 룰 덕분이 아님을 확인했다. 다만 Falco에서 룰을 제거했을 때 오버헤드가 오히려 커진 현상에 대해 제시한 "이벤트 유형 필터링" 설명은 libsinsp 내부 계측으로 검증하지 않은 추정이다 — 코드 수준 확인이나 이벤트 유형별 더미 룰 같은 후속 대조군으로 확정할 필요가 있다.
 
 **적용 범위 확장 (우선순위 낮음)**
-- **다른 CVE로의 일반화**: 4.6절에서 TorchServe(CVE-2023-43654)·MLflow(CVE-2024-37054)·Triton(CVE-2023-31036)·vLLM(CVE-2025-66448)·BentoML(CVE-2024-2912/2025-27520)·Gradio(CVE-2024-1561)·text-generation-webui(CVE-2025-12487/88) 일곱 사례에 대해 커널 코드 변경 없이 `kshield_ctl parent-add` 런타임 등록만으로 탐지됨을 예비 확인하였다. 다만 각 1회 기능 확인에 그쳐, 4.3~4.5절 수준의 반복 통계 측정과 Falco/Tetragon 비교는 아직 없다. 일곱 프레임워크 모두 이 수준까지 검증을 넓힐 필요가 있으며, 아직 다루지 않은 다른 CVE·프레임워크로도 계속 확장할 수 있다.
+- **다른 CVE로의 일반화**: 4.6절에서 TorchServe(CVE-2023-43654)·MLflow(CVE-2024-37054)·Triton(CVE-2023-31036)·vLLM(CVE-2025-66448)·BentoML(CVE-2024-2912/2025-27520)·Gradio(CVE-2024-1561)·text-generation-webui(CVE-2025-12487/88) 일곱 사례에 대해 커널 코드 변경 없이 `kshield_ctl parent-add` 런타임 등록만으로 탐지됨을 예비 확인하였고, 4.6.1절에서 같은 일곱 사례에 대해 Falco·Tetragon도 룰/정책에 이름·경로만 추가하면 동일하게 탐지함을 확인하였다. 다만 전부 1회 기능 확인에 그쳐, 4.3~4.5절 수준의 반복 통계 측정과 세 도구 간 오버헤드·성능 비교는 아직 없다. 일곱 프레임워크 모두 이 수준까지 검증을 넓힐 필요가 있으며, 아직 다루지 않은 다른 CVE·프레임워크로도 계속 확장할 수 있다.
 - **cgroup 단위 예외의 VM 검증**: v10(3.10절)에서 `exempt_cgroups_map`을 구현하였으나, `exempt_uids_map`(검증됨)과 동일한 코드 경로를 공유한다는 점에만 근거해 검증을 생략하였다 — 실제 cgroup ID를 이용한 VM 실측이 필요하다.
 - **진짜 쿠버네티스 네임스페이스 인지**: v10의 cgroup 단위 예외는 "네임스페이스"의 근사치일 뿐이다. cgroup ID를 실제 K8s 네임스페이스로 매핑하려면 K8s API 서버를 감시하는 별도 컨트롤 플레인이 필요하며, 이는 현재 범위를 크게 벗어난다.
 - **syslog 연동의 종단 검증**: `--syslog`(3.9절)는 로컬 syslog 소켓에 JSON이 정확히 기록되는 것까지만 확인하였다. 실제 rsyslog/journald 포워더를 거쳐 SIEM(Splunk, ELK 등)까지 도달·파싱되는지는 검증하지 않았다.
