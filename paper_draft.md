@@ -651,14 +651,17 @@ Falco 쪽 결과는 애초 세운 가설("룰을 걷어내면 가벼워질 것")
 
 3.1절은 "ShadowRay 외 다른 CVE에 대한 일반화된 방어는 본 논문의 범위 밖"이라고 명시하였다. SHADOW_EXEC/SHADOW_CONNECT의 판정 로직 자체는 "어떻게 코드 실행 권한을 얻었는가"가 아니라 "그 권한으로 무엇을 하려 하는가"만 보므로 원리적으로는 다른 취약점에도 적용될 수 있어야 하지만, 지금까지는 실측으로 확인한 적이 없었다. 이 절은 그 공백을 메우기 위해, 커널 코드(`kshield_vpatch.bpf.c`)를 **한 줄도 수정하지 않고** `kshield_ctl parent-add`(3.9~3.10절의 런타임 제어 계층)만으로 다른 프레임워크의 다른 CVE도 막히는지 확인한 예비 실험이다.
 
-**대상 선정**: ShadowRay와의 구조적 유사성과 노출 조건이 서로 다른 네 CVE를 의도적으로 골랐다.
+**대상 선정**: ShadowRay와의 구조적 유사성과 노출 조건이 서로 다른 일곱 CVE를 의도적으로 골랐다.
 
 - **CVE-2023-43654(ShellTorch, TorchServe)** [12]: 인증 없는 관리 API가 원격 URL의 모델 아카이브를 등록·로드하면서 즉시 코드가 실행된다 — ShadowRay와 공격 구조(인증 없는 API → 즉시 코드 실행)는 같지만, 실제로는 Java 프런트엔드가 Python 백엔드 워커를 fork해 그 안에서 핸들러 코드를 실행하는 서로 다른 언어 런타임 간 경계를 가진다. "언어·런타임이 달라도 계보 추적이 끊기지 않는가"를 보기 위한 선택이다.
 - **CVE-2024-37054(MLflow)** [13]: `mlflow.pyfunc.load_model()`이 모델 아티팩트(pickle)를 검증 없이 역직렬화하며 코드가 실행된다. ShadowRay·ShellTorch와 달리 공격이 **요청 한 번으로 끝나지 않는다** — ① 악성 아티팩트를 올려 두는 시점에는 아무 행위도 일어나지 않고, ② 그 뒤 누군가 모델을 로드(역직렬화)하는 순간에만 코드가 실행된다. "위험해 보이는 데이터가 존재하는 것"이 아니라 "실제 행위가 발생하는 순간"만 판정 기준으로 삼는 kShield-VirtualPatch의 설계 철학(2.4절)이 이런 지연 실행형 취약점에서도 성립하는지 보기 위한 선택이다.
 - **CVE-2023-31036(Triton Inference Server)** [14]: 모델 저장소 로드 API(`POST /v2/repository/models/<name>/load`)의 상대 경로 순회로, 저장소 밖의 임의 경로를 모델 디렉터리로 지정해 그 안의 Python 백엔드 코드를 실행시킨다. 앞의 두 사례와 달리 **기본 상태에서는 발동하지 않고, 운영자가 `--model-control explicit`(모델을 재시작 없이 올리고 내리기 위한 비기본 옵션)를 켰을 때만** 노출된다 — "기본으로 열려 있는 API"(ShadowRay·ShellTorch)나 "저장소 쓰기 권한만 있으면 되는 경우"(MLflow)와는 또 다른 노출 조건에서도 탐지가 성립하는지 보기 위한 선택이다.
 - **CVE-2025-66448(vLLM)** [15]: `trust_remote_code=False`로 설정해 신뢰 안 된 모델 코드 실행을 막았다고 믿는 상태에서도, 모델의 `auto_map` 필드가 별도의 "백엔드" 저장소를 가리키면 `get_class_from_dynamic_module`이 그 저장소의 코드를 검증 없이 실행한다. 앞의 세 사례와 달리 **운영자가 이미 안전 조치를 취했다고 믿는 상태에서 우회되는 취약점**이다 — 3.1절에서 다룬 Ray 토큰 인증 우회(CVE-2025-62593)와 같은 결로, "완화책을 적용했다고 해서 행위 기반 탐지가 불필요해지지 않는다"는 주장을 다른 프레임워크에서도 검증하기 위한 선택이다.
+- **CVE-2024-2912/CVE-2025-27520(BentoML)** [16]: `Content-Type: application/vnd.bentoml+pickle`이 붙은 요청은 본문을 검증 없이 `pickle.loads()`로 역직렬화한다. MLflow와 같은 pickle 기반이지만, MLflow의 "업로드 후 나중에 로드"하는 2단계와 달리 **요청 한 번에 즉시** 역직렬화·실행된다 — 같은 취약점 부류(역직렬화) 안에서도 실행 시점이 다른 경우까지 구분해서 잡히는지 보기 위한 선택이다.
+- **CVE-2024-1561(Gradio)** [17]: `/component_server` 엔드포인트가 Component 클래스의 어떤 메서드든 공격자가 지정한 인자로 호출하도록 열려 있다. 앞의 여섯 사례가 전부 "모델을 등록·로드하면 그 안의 코드가 실행된다"는 형태였던 반면, 이건 **모델 로딩과 무관하게 서버 자신이 노출한 RPC 스타일 엔드포인트가 임의 메서드 호출을 허용**하는 다른 유형의 취약점이다 — 공격 벡터의 "형태" 자체가 달라져도 탐지가 성립하는지 보기 위한 선택이다.
+- **CVE-2025-12487/CVE-2025-12488(oobabooga text-generation-webui)** [18]: 모델 로드 API가 `trust_remote_code` 값을 요청 파라미터로 그대로 받아 쓴다. vLLM(CVE-2025-66448)이 "이미 꺼진 안전장치를 우회"하는 경우였다면, 이건 **안전장치를 공격자가 요청에서 그냥 켤 수 있는** 더 근본적인 경우다 — "우회"와 "노출" 두 가지 실패 양상 모두에서 탐지가 성립하는지 대비해 보기 위한 선택이다.
 
-실제 TorchServe/MLflow/Triton/vLLM을 설치하는 대신 3.4절과 동일한 원칙으로 목업 서버(`attack/mock_torchserve_server.py`, `attack/mock_mlflow_server.py`, `attack/mock_triton_server.py`, `attack/mock_vllm_server.py`)를 만들어 각 취약점의 핵심 동작(공격자 제어 API가 공격자 지정 명령을 실행시킨다)만 재현하였다. Triton의 경로 순회, vLLM의 `auto_map`/`get_class_from_dynamic_module` 해석 로직처럼 정확한 내부 메커니즘 자체는 재현하지 않고, "그 결과로 저장소 밖 코드가 로드·실행된다"는 결과만 재현하였다. 네 목업 서버는 감시 대상 프로세스명 자체가 기본값(`watched_parents[]`)에 없는 "torchserve", "mlflow", "tritonserver", "vllm"이라는 이름으로 실행되며, `kshield_ctl parent-add`로 런타임에 등록해야만 탐지 대상이 된다 — 등록하지 않으면 탐지되지 않는 것이 정상이다.
+실제 프레임워크들을 설치하는 대신 3.4절과 동일한 원칙으로 목업 서버(`attack/mock_torchserve_server.py`, `attack/mock_mlflow_server.py`, `attack/mock_triton_server.py`, `attack/mock_vllm_server.py`, `attack/mock_bentoml_server.py`, `attack/mock_gradio_server.py`, `attack/mock_textgenwebui_server.py`)를 만들어 각 취약점의 핵심 동작(공격자 제어 API가 공격자 지정 명령을 실행시킨다)만 재현하였다. Triton의 경로 순회, vLLM의 `auto_map`/`get_class_from_dynamic_module` 해석 로직, Gradio의 실제 Component 메서드 디스패치처럼 정확한 내부 메커니즘 자체는 재현하지 않고, "그 결과로 공격자 제어 코드가 실행된다"는 결과만 재현하였다. 일곱 목업 서버는 감시 대상 프로세스명 자체가 기본값(`watched_parents[]`)에 없는 "torchserve", "mlflow", "tritonserver", "vllm", "bentoml", "gradio", "textgenwebui"라는 이름으로 실행되며, `kshield_ctl parent-add`로 런타임에 등록해야만 탐지 대상이 된다 — 등록하지 않으면 탐지되지 않는 것이 정상이다.
 
 **결과**:
 
@@ -668,10 +671,13 @@ Falco 쪽 결과는 애초 세운 가설("룰을 걷어내면 가벼워질 것")
 | CVE-2024-37054 | MLflow | 지연 실행(업로드 후 로드 시) | mlflow → sh → nc (2단계) | 업로드 단계: 탐지 없음(정상) → 로드 단계: SHADOW_EXEC 탐지·SIGKILL |
 | CVE-2023-31036 | Triton | 즉시 실행(비기본 옵션 하에서) | tritonserver → python3(백엔드 스텁) → sh → nc (3단계) | SHADOW_EXEC 탐지·SIGKILL |
 | CVE-2025-66448 | vLLM | 즉시 실행(안전 플래그 우회) | vllm → sh → nc (2단계) | SHADOW_EXEC 탐지·SIGKILL |
+| CVE-2024-2912/2025-27520 | BentoML | 즉시 실행(역직렬화, 단일 요청) | bentoml → sh → nc (2단계) | SHADOW_EXEC 탐지·SIGKILL |
+| CVE-2024-1561 | Gradio | 즉시 실행(임의 메서드 호출) | gradio → sh → nc (2단계) | SHADOW_EXEC 탐지·SIGKILL |
+| CVE-2025-12487/12488 | text-generation-webui | 즉시 실행(안전 플래그 노출) | textgenwebui → sh → nc (2단계) | SHADOW_EXEC 탐지·SIGKILL |
 
-TorchServe·Triton의 3단계 계보(`torchserve`/`tritonserver` → python3 워커·스텁 → sh → nc)는 ShadowRay의 2단계 계보(`raylet → sh → curl`)보다 한 단계 더 깊은데도 `ai_worker_lineage` 추적이 끊기지 않았다. MLflow는 악성 아티팩트를 올린 직후 `journalctl` 조회에서 이벤트가 전혀 없었고(대조군), 로드 요청을 보낸 시점에만 탐지되었다 — 데이터가 존재하는 것과 그 데이터로 인해 실제 행위가 발생하는 것을 정확히 구분함을 확인하였다. vLLM은 운영자가 `trust_remote_code=False`로 이미 방어했다고 믿을 만한 상황에서도 똑같이 탐지되었다 — SHADOW_EXEC/SHADOW_CONNECT는 애플리케이션 계층의 안전장치가 실제로 작동했는지와 무관하게, 그 안전장치를 통과한 뒤의 행위만 보고 판단하기 때문이다.
+TorchServe·Triton의 3단계 계보(`torchserve`/`tritonserver` → python3 워커·스텁 → sh → nc)는 ShadowRay의 2단계 계보(`raylet → sh → curl`)보다 한 단계 더 깊은데도 `ai_worker_lineage` 추적이 끊기지 않았다. MLflow는 악성 아티팩트를 올린 직후 `journalctl` 조회에서 이벤트가 전혀 없었고(대조군), 로드 요청을 보낸 시점에만 탐지되었다 — 데이터가 존재하는 것과 그 데이터로 인해 실제 행위가 발생하는 것을 정확히 구분함을 확인하였다. vLLM·text-generation-webui는 애플리케이션 계층의 안전장치(`trust_remote_code`)가 우회되었든(vLLM) 애초에 노출되었든(text-generation-webui) 똑같이 탐지되었다 — SHADOW_EXEC/SHADOW_CONNECT는 그 안전장치가 실제로 작동했는지와 무관하게, 안전장치를 통과한 뒤의 행위만 보고 판단하기 때문이다. Gradio는 취약점의 형태 자체가 "모델 로딩"이 아닌 "임의 메서드 호출"이었는데도 결과가 동일한 exec/connect 행위로 귀결되는 한 똑같이 잡혔다 — 탐지가 공격 벡터의 종류가 아니라 그 결과 행위만 본다는 설계 의도(3.3절)를 다시 확인해 준다.
 
-**한계 (반드시 함께 읽을 것)**: (1) 각 시나리오 **1회씩만** 실행한 기능적 확인이며, 4.3절(N=10)·4.4절(N=10)·4.5절(N=20) 같은 반복 통계 측정은 하지 않았다. (2) Falco·Tetragon과의 비교도 하지 않았다 — kShield-VirtualPatch 자신이 막는지만 확인하였다. (3) 네 취약점 모두 실제 TorchServe·MLflow·Triton·vLLM을 설치하지 않고 목업으로 핵심 동작만 재현하였다(3.1절의 Ray 토큰 인증 검증만 예외적으로 실제 설치본을 썼다). (4) 네 사례 모두 최종적으로 의심 바이너리 실행(SHADOW_EXEC, `nc`)으로 귀결되도록 구성하였다 — SHADOW_CONNECT(신뢰 안 된 목적지 connect) 경로나, exec/connect 어느 쪽으로도 안 드러나는 공격 형태(3.3절 한계에 이미 명시한 기존 연결 재사용, 로컬 전용 공격 등)는 이번 예비 실험에 포함되지 않았다. 따라서 이 절의 결론은 "**같은 커널 로직이 노출 조건이 서로 다른 최소 네 개의 CVE에도 런타임 등록만으로 작동함을 확인**"까지이며, "임의의 CVE를 다 막는다"는 주장으로 확장해서는 안 된다.
+**한계 (반드시 함께 읽을 것)**: (1) 각 시나리오 **1회씩만** 실행한 기능적 확인이며, 4.3절(N=10)·4.4절(N=10)·4.5절(N=20) 같은 반복 통계 측정은 하지 않았다. (2) Falco·Tetragon과의 비교도 하지 않았다 — kShield-VirtualPatch 자신이 막는지만 확인하였다. (3) 일곱 취약점 모두 실제 프레임워크를 설치하지 않고 목업으로 핵심 동작만 재현하였다(3.1절의 Ray 토큰 인증 검증만 예외적으로 실제 설치본을 썼다). (4) 일곱 사례 모두 최종적으로 의심 바이너리 실행(SHADOW_EXEC, `nc`)으로 귀결되도록 구성하였다 — SHADOW_CONNECT(신뢰 안 된 목적지 connect) 경로나, exec/connect 어느 쪽으로도 안 드러나는 공격 형태(3.3절 한계에 이미 명시한 기존 연결 재사용, 로컬 전용 공격 등)는 이번 예비 실험에 포함되지 않았다. (5) Gradio의 경우 공개된 실제 공격은 파일 읽기이며, 코드 실행으로 이어지는 구체적 메서드는 공개돼 있지 않다 — "임의 메서드 호출이 가능하다"는 원시적 능력만 실측하고, 그 능력이 셸 명령 실행으로 이어지는 구간은 payload_cmd로 직접 단순화하였다. 따라서 이 절의 결론은 "**같은 커널 로직이 형태·노출 조건이 서로 다른 최소 일곱 개의 CVE에도 런타임 등록만으로 작동함을 확인**"까지이며, "임의의 CVE를 다 막는다"는 주장으로 확장해서는 안 된다.
 
 ---
 
@@ -705,7 +711,7 @@ Falco·Tetragon에 같은 판정을 이식해 같은 VM·세션에서 비교한 
 - **Falco "무룰 시 오버헤드 증가" 기전 규명**: 4.5.1절의 대조군 실험(falco_norules/tetragon_norules)으로 Tetragon의 오버헤드는 정책 내용과 무관한 에이전트 기반 비용이며, kShield-VirtualPatch의 경량성이 AI 서버 전용으로 좁게 쓴 룰 덕분이 아님을 확인했다. 다만 Falco에서 룰을 제거했을 때 오버헤드가 오히려 커진 현상에 대해 제시한 "이벤트 유형 필터링" 설명은 libsinsp 내부 계측으로 검증하지 않은 추정이다 — 코드 수준 확인이나 이벤트 유형별 더미 룰 같은 후속 대조군으로 확정할 필요가 있다.
 
 **적용 범위 확장 (우선순위 낮음)**
-- **다른 CVE로의 일반화**: 4.6절에서 TorchServe(CVE-2023-43654)·MLflow(CVE-2024-37054)·Triton(CVE-2023-31036)·vLLM(CVE-2025-66448) 네 사례에 대해 커널 코드 변경 없이 `kshield_ctl parent-add` 런타임 등록만으로 탐지됨을 예비 확인하였다. 다만 각 1회 기능 확인에 그쳐, 4.3~4.5절 수준의 반복 통계 측정과 Falco/Tetragon 비교는 아직 없다. 네 프레임워크 모두 이 수준까지 검증을 넓힐 필요가 있으며, 아직 다루지 않은 다른 CVE·프레임워크로도 계속 확장할 수 있다.
+- **다른 CVE로의 일반화**: 4.6절에서 TorchServe(CVE-2023-43654)·MLflow(CVE-2024-37054)·Triton(CVE-2023-31036)·vLLM(CVE-2025-66448)·BentoML(CVE-2024-2912/2025-27520)·Gradio(CVE-2024-1561)·text-generation-webui(CVE-2025-12487/88) 일곱 사례에 대해 커널 코드 변경 없이 `kshield_ctl parent-add` 런타임 등록만으로 탐지됨을 예비 확인하였다. 다만 각 1회 기능 확인에 그쳐, 4.3~4.5절 수준의 반복 통계 측정과 Falco/Tetragon 비교는 아직 없다. 일곱 프레임워크 모두 이 수준까지 검증을 넓힐 필요가 있으며, 아직 다루지 않은 다른 CVE·프레임워크로도 계속 확장할 수 있다.
 - **cgroup 단위 예외의 VM 검증**: v10(3.10절)에서 `exempt_cgroups_map`을 구현하였으나, `exempt_uids_map`(검증됨)과 동일한 코드 경로를 공유한다는 점에만 근거해 검증을 생략하였다 — 실제 cgroup ID를 이용한 VM 실측이 필요하다.
 - **진짜 쿠버네티스 네임스페이스 인지**: v10의 cgroup 단위 예외는 "네임스페이스"의 근사치일 뿐이다. cgroup ID를 실제 K8s 네임스페이스로 매핑하려면 K8s API 서버를 감시하는 별도 컨트롤 플레인이 필요하며, 이는 현재 범위를 크게 벗어난다.
 - **syslog 연동의 종단 검증**: `--syslog`(3.9절)는 로컬 syslog 소켓에 JSON이 정확히 기록되는 것까지만 확인하였다. 실제 rsyslog/journald 포워더를 거쳐 SIEM(Splunk, ELK 등)까지 도달·파싱되는지는 검증하지 않았다.
@@ -736,3 +742,6 @@ Falco·Tetragon에 같은 판정을 이식해 같은 VM·세션에서 비교한 
 [13] Snyk, "Deserialization of Untrusted Data in mlflow (CVE-2024-37054)," Snyk Vulnerability Database, 2024. [Online]. Available: https://security.snyk.io/vuln/SNYK-PYTHON-MLFLOW-7210300
 [14] NVIDIA, "Security Bulletin: NVIDIA Triton Inference Server - December 2023 (CVE-2023-31036)," 2023. [Online]. Available: https://nvidia.custhelp.com/app/answers/detail/a_id/5509/~/security-bulletin:-nvidia-triton-inference-server---december-2023
 [15] ZeroPath, "vLLM Remote Code Execution via Model Config Auto-Mapping: CVE-2025-66448 Brief Summary," 2025. [Online]. Available: https://zeropath.com/blog/cve-2025-66448-vllm-rce-automap
+[16] BentoML, "Remote Code Execution (RCE) Caused by Insecure Deserialization (GHSA-33xw-247w-6hmc, CVE-2024-2912/CVE-2025-27520)," GitHub Security Advisory, 2025. [Online]. Available: https://github.com/bentoml/BentoML/security/advisories/GHSA-33xw-247w-6hmc
+[17] Gradio, "gradio vulnerable to arbitrary method invocation via /component_server (GHSA-g9cj-cfpp-4g2x, CVE-2024-1561)," GitHub Advisory Database, 2024. [Online]. Available: https://github.com/advisories/GHSA-g9cj-cfpp-4g2x
+[18] SentinelOne, "CVE-2025-12487: Text-Generation-WebUI RCE Vulnerability," SentinelOne Vulnerability Database, 2025. [Online]. Available: https://www.sentinelone.com/vulnerability-database/cve-2025-12487/
