@@ -124,7 +124,7 @@ Falco [5], Tetragon [6] 등 eBPF 기반 런타임 보안 도구는 커스텀 룰
 
 공격자의 궁극적 목표는 원격 코드 실행을 통해 정상적인 AI 워커 프로세스의 권한으로 비정상적인 하위 프로세스를 실행하거나(예: `/bin/sh`, `curl`), 공격자가 제어하는 외부 서버로 아웃바운드 연결을 수립하여 2차 피해(암호화폐 채굴, 데이터 유출, 크레덴셜 탈취)를 유발하는 것이다.
 
-단, 본 논문은 ShadowRay 취약점의 원격 코드 실행 이후 악성 행위 탐지에 집중하며, 취약점 자체의 존재 여부 진단이나 초기 침투 벡터 차단은 다루지 않는다. 또한 프레임워크 소스 코드 자체를 사전에 변조하거나 커널 루트킷을 삽입하는 공격, 그리고 ShadowRay 외 다른 CVE에 대한 일반화된 방어는 본 논문의 범위 밖으로 한다.
+단, 본 논문은 ShadowRay 취약점의 원격 코드 실행 이후 악성 행위 탐지에 집중하며, 취약점 자체의 존재 여부 진단이나 초기 침투 벡터 차단은 다루지 않는다. 또한 프레임워크 소스 코드 자체를 사전에 변조하거나 커널 루트킷을 삽입하는 공격은 범위 밖으로 한다. ShadowRay 외 다른 CVE에 대한 일반화된 방어(성능·탐지율을 포함한 정식 검증)도 본 논문의 범위 밖이나, 커널 코드 변경 없이 런타임 등록만으로 다른 CVE·프레임워크도 막히는지에 대한 소규모 예비 확인은 4.6절에서 수행하였다.
 
 **윤리적 고려**: CVE-2023-48022는 2023년에 이미 공개되었고, 벤더가 "의도된 설계"라는 입장을 유지하며 별도 패치를 제공하지 않고 있어(위 [2]), 본 논문이 새로운 취약점을 폭로하는 것이 아니라 이미 공개되고 실제로 악용되고 있는 취약점에 대한 방어 기법을 다룬다. 탐지·성능 실험은 실제 Ray 클러스터가 아닌 저자가 직접 구현한 목업 서버(3.4절)만을 대상으로 하였으며, 공개 저장소의 공격 스크립트(`attack/exploit_shadowray.py`) 역시 기본 대상이 이 목업 서버로 설정되어 있어 실제 피해 없이 방어 효과만 재현할 수 있도록 하였다. 위 토큰 인증 검증만 예외적으로 실제 Ray 2.52.0을 설치해 수행하였는데, 격리된 로컬 환경(loopback 주소, 별도 가상환경)에서 파일 하나를 생성하는 무해한 명령만 제출하였고 외부로 노출되거나 실제 피해를 유발하는 행위는 없었다.
 
@@ -647,6 +647,28 @@ Falco 쪽 결과는 애초 세운 가설("룰을 걷어내면 가벼워질 것")
 
 **범위와 한계**: (1) 감시 루트는 python3(본 논문 전체와 동일)이며 IPv4 한정이다. (2) Tetragon 정책에는 exec 계층이 없어 `nc`도 connect 단계에서 차단되므로, 표10의 "연결 수립" 차이는 도구의 우열이 아니라 계층 설계의 차이다. (3) kShield-VirtualPatch의 신뢰 IP·예외 UID·cgroup 예외·syslog 연동 같은 운영 기능(3.9~3.10절)은 이 실험이 비교하지 않는다 — 정성적으로만 2.3절에서 대비하였다. (4) 위 결과는 VM 1대·세션 1회의 측정이다. 4.4절의 절대 수치와 마찬가지로 세션 간 절대 비교는 하지 않았으며, 여러 세션에 걸친 반복 측정은 향후 연구로 남긴다(5장). (5) 4.5.1절의 Falco "이벤트 유형 필터링" 설명은 libsinsp 내부 계측으로 확인하지 않은 추정이다 — 코드 수준 검증은 향후 연구로 남긴다.
 
+### 4.6 다른 CVE·프레임워크로의 일반화 검증 (예비 실험)
+
+3.1절은 "ShadowRay 외 다른 CVE에 대한 일반화된 방어는 본 논문의 범위 밖"이라고 명시하였다. SHADOW_EXEC/SHADOW_CONNECT의 판정 로직 자체는 "어떻게 코드 실행 권한을 얻었는가"가 아니라 "그 권한으로 무엇을 하려 하는가"만 보므로 원리적으로는 다른 취약점에도 적용될 수 있어야 하지만, 지금까지는 실측으로 확인한 적이 없었다. 이 절은 그 공백을 메우기 위해, 커널 코드(`kshield_vpatch.bpf.c`)를 **한 줄도 수정하지 않고** `kshield_ctl parent-add`(3.9~3.10절의 런타임 제어 계층)만으로 다른 프레임워크의 다른 CVE도 막히는지 확인한 예비 실험이다.
+
+**대상 선정**: ShadowRay와의 구조적 유사성이 서로 다른 두 CVE를 의도적으로 골랐다.
+
+- **CVE-2023-43654(ShellTorch, TorchServe)** [12]: 인증 없는 관리 API가 원격 URL의 모델 아카이브를 등록·로드하면서 즉시 코드가 실행된다 — ShadowRay와 공격 구조(인증 없는 API → 즉시 코드 실행)는 같지만, 실제로는 Java 프런트엔드가 Python 백엔드 워커를 fork해 그 안에서 핸들러 코드를 실행하는 서로 다른 언어 런타임 간 경계를 가진다. "언어·런타임이 달라도 계보 추적이 끊기지 않는가"를 보기 위한 선택이다.
+- **CVE-2024-37054(MLflow)** [13]: `mlflow.pyfunc.load_model()`이 모델 아티팩트(pickle)를 검증 없이 역직렬화하며 코드가 실행된다. ShadowRay·ShellTorch와 달리 공격이 **요청 한 번으로 끝나지 않는다** — ① 악성 아티팩트를 올려 두는 시점에는 아무 행위도 일어나지 않고, ② 그 뒤 누군가 모델을 로드(역직렬화)하는 순간에만 코드가 실행된다. "위험해 보이는 데이터가 존재하는 것"이 아니라 "실제 행위가 발생하는 순간"만 판정 기준으로 삼는 kShield-VirtualPatch의 설계 철학(2.4절)이 이런 지연 실행형 취약점에서도 성립하는지 보기 위한 선택이다.
+
+실제 TorchServe/MLflow를 설치하는 대신 3.4절과 동일한 원칙으로 목업 서버(`attack/mock_torchserve_server.py`, `attack/mock_mlflow_server.py`)를 만들어 각 취약점의 핵심 동작(인증 없는 API가 공격자 지정 명령을 실행시킨다)만 재현하였다. 두 목업 서버는 감시 대상 프로세스명 자체가 기본값(`watched_parents[]`)에 없는 "torchserve", "mlflow"라는 이름으로 실행되며, `kshield_ctl parent-add`로 런타임에 등록해야만 탐지 대상이 된다 — 등록하지 않으면 탐지되지 않는 것이 정상이다.
+
+**결과**:
+
+| CVE | 프레임워크 | 공격 형태 | 계보 | 결과 |
+|---|---|---|---|---|
+| CVE-2023-43654 | TorchServe | 즉시 실행 | torchserve → python3(워커) → sh → nc (3단계) | SHADOW_EXEC 탐지·SIGKILL |
+| CVE-2024-37054 | MLflow | 지연 실행(업로드 후 로드 시) | mlflow → sh → nc (2단계) | 업로드 단계: 탐지 없음(정상) → 로드 단계: SHADOW_EXEC 탐지·SIGKILL |
+
+TorchServe 계보(`torchserve → python3 워커 → sh → nc`)는 ShadowRay의 2단계 계보(`raylet → sh → curl`)보다 한 단계 더 깊은데도 `ai_worker_lineage` 추적이 끊기지 않았다. MLflow는 악성 아티팩트를 올린 직후 `journalctl` 조회에서 이벤트가 전혀 없었고(대조군), 로드 요청을 보낸 시점에만 탐지되었다 — 데이터가 존재하는 것과 그 데이터로 인해 실제 행위가 발생하는 것을 정확히 구분함을 확인하였다.
+
+**한계 (반드시 함께 읽을 것)**: (1) 각 시나리오 **1회씩만** 실행한 기능적 확인이며, 4.3절(N=10)·4.4절(N=10)·4.5절(N=20) 같은 반복 통계 측정은 하지 않았다. (2) Falco·Tetragon과의 비교도 하지 않았다 — kShield-VirtualPatch 자신이 막는지만 확인하였다. (3) 두 취약점 모두 실제 TorchServe·MLflow를 설치하지 않고 목업으로 핵심 동작만 재현하였다(3.1절의 Ray 토큰 인증 검증만 예외적으로 실제 설치본을 썼다). (4) 두 사례 모두 최종적으로 의심 바이너리 실행(SHADOW_EXEC, `nc`)으로 귀결되도록 구성하였다 — SHADOW_CONNECT(신뢰 안 된 목적지 connect) 경로나, exec/connect 어느 쪽으로도 안 드러나는 공격 형태(3.3절 한계에 이미 명시한 기존 연결 재사용, 로컬 전용 공격 등)는 이번 예비 실험에 포함되지 않았다. 따라서 이 절의 결론은 "**같은 커널 로직이 최소 두 개의 구조적으로 다른 CVE에도 런타임 등록만으로 작동함을 확인**"까지이며, "임의의 CVE를 다 막는다"는 주장으로 확장해서는 안 된다.
+
 ---
 
 ## 5. 결론 및 향후 연구
@@ -679,7 +701,7 @@ Falco·Tetragon에 같은 판정을 이식해 같은 VM·세션에서 비교한 
 - **Falco "무룰 시 오버헤드 증가" 기전 규명**: 4.5.1절의 대조군 실험(falco_norules/tetragon_norules)으로 Tetragon의 오버헤드는 정책 내용과 무관한 에이전트 기반 비용이며, kShield-VirtualPatch의 경량성이 AI 서버 전용으로 좁게 쓴 룰 덕분이 아님을 확인했다. 다만 Falco에서 룰을 제거했을 때 오버헤드가 오히려 커진 현상에 대해 제시한 "이벤트 유형 필터링" 설명은 libsinsp 내부 계측으로 검증하지 않은 추정이다 — 코드 수준 확인이나 이벤트 유형별 더미 룰 같은 후속 대조군으로 확정할 필요가 있다.
 
 **적용 범위 확장 (우선순위 낮음)**
-- **다른 CVE로의 일반화**: 현재는 ShadowRay 한 사례에 특화되어 있다. Triton, TorchServe, MLflow 등 다른 프레임워크의 알려진 CVE에 대해서도 유사한 방식의 룰을 구축하고 공통 프레임워크로 일반화할 필요가 있다.
+- **다른 CVE로의 일반화**: 4.6절에서 TorchServe(CVE-2023-43654)·MLflow(CVE-2024-37054) 두 사례에 대해 커널 코드 변경 없이 `kshield_ctl parent-add` 런타임 등록만으로 탐지됨을 예비 확인하였다. 다만 각 1회 기능 확인에 그쳐, 4.3~4.5절 수준의 반복 통계 측정과 Falco/Tetragon 비교는 아직 없다. Triton 등 남은 프레임워크로의 확장과 함께, TorchServe/MLflow도 이 수준까지 검증을 넓힐 필요가 있다.
 - **cgroup 단위 예외의 VM 검증**: v10(3.10절)에서 `exempt_cgroups_map`을 구현하였으나, `exempt_uids_map`(검증됨)과 동일한 코드 경로를 공유한다는 점에만 근거해 검증을 생략하였다 — 실제 cgroup ID를 이용한 VM 실측이 필요하다.
 - **진짜 쿠버네티스 네임스페이스 인지**: v10의 cgroup 단위 예외는 "네임스페이스"의 근사치일 뿐이다. cgroup ID를 실제 K8s 네임스페이스로 매핑하려면 K8s API 서버를 감시하는 별도 컨트롤 플레인이 필요하며, 이는 현재 범위를 크게 벗어난다.
 - **syslog 연동의 종단 검증**: `--syslog`(3.9절)는 로컬 syslog 소켓에 JSON이 정확히 기록되는 것까지만 확인하였다. 실제 rsyslog/journald 포워더를 거쳐 SIEM(Splunk, ELK 등)까지 도달·파싱되는지는 검증하지 않았다.
@@ -706,3 +728,5 @@ Falco·Tetragon에 같은 판정을 이식해 같은 VM·세션에서 비교한 
 [9] 이상헌, "kShield-VirtualPatch: eBPF 기반 AI 서빙 프레임워크 취약점 가상 패치 구현 코드," GitHub, 2026. [Online]. Available: https://github.com/sangheon-lee1028/kShield-VirtualPatch
 [10] Oligo Security, "ShadowRay 2.0: Active Global Campaign Hijacks Ray AI Infrastructure Into Self-Propagating Botnet," Nov. 2025. [Online]. Available: https://www.oligo.security/blog/shadowray-2-0-attackers-turn-ai-against-itself-in-global-campaign-that-hijacks-ai-into-self-propagating-botnet
 [11] Anyscale, "CVE-2025-62593 and the CISA KEV listing: what Ray users need to know," Anyscale Blog, Aug. 2026. [Online]. Available: https://www.anyscale.com/blog/ray-cve-2025-62593-kev-what-you-need-to-know
+[12] Oligo Security, "ShellTorch: Multiple Critical Vulnerabilities in PyTorch Model Server (TorchServe) (CVSS 9.9, CVSS 9.8)," Oct. 2023. [Online]. Available: https://www.oligo.security/blog/shelltorch-torchserve-ssrf-vulnerability-cve-2023-43654
+[13] Snyk, "Deserialization of Untrusted Data in mlflow (CVE-2024-37054)," Snyk Vulnerability Database, 2024. [Online]. Available: https://security.snyk.io/vuln/SNYK-PYTHON-MLFLOW-7210300
