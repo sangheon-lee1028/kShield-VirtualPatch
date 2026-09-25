@@ -34,6 +34,21 @@
  * kshield_ctl로 바꿔둔 값을 그대로 둔다. exempt_cgroups_map은
  * exempt_uids_map과 동일한 목적으로 핀하되(UID보다 세밀한 컨테이너/파드
  * 단위 예외) 기본값 시드는 없다.
+ *
+ * v11: 지금까지는 skel->maps.*만 핀했고, 실제 판정·SIGKILL을 수행하는 BPF
+ * 프로그램의 부착(attach, struct bpf_link) 자체는 핀하지 않았다. 그 결과
+ * 데몬이 정상 종료가 아니라 크래시하거나 kill -9로 죽으면, 그 attach를
+ * 쥐고 있던 파일 디스크립터가 함께 닫히며 커널이 BPF 프로그램을 자동으로
+ * 회수해 그 순간부터 완전히 무방비(fail-open)가 됨을 Tetragon과의 대조
+ * 실험(데몬을 kill -9로 죽여도 Tetragon은 attach를 bpffs에 핀해 둬서 계속
+ * 동작함)으로 실측하였다. 다섯 개 프로그램의 link를 전부 bpffs에 핀해
+ * 데몬 생사와 무관하게 커널에 남도록 한다. 재시작 시 이전 실행(크래시)이
+ * 남긴 핀이 있으면, 새 attach를 먼저 만든 뒤에 옛 핀을 지운다 — 이
+ * 순서라면 옛 attach가 사라지는 시점엔 이미 새 attach가 똑같이 동작
+ * 중이라 보호 공백이 생기지 않는다. 반대로 SIGINT/SIGTERM 같은 "의도된"
+ * 종료에서는 운영자가 실제로 보호를 끄고 싶은 것이므로 종료 직전에 핀을
+ * 명시적으로 지운다 — SIGKILL은 애초에 핸들러를 타지 않으므로 이 경로를
+ * 거치지 않고, 그래서 핀이 그대로 남아 계속 보호한다(의도한 동작).
  */
 #include <stdio.h>
 #include <signal.h>
@@ -156,6 +171,58 @@ static int libbpf_print_fn(enum libbpf_print_level level, const char *fmt, va_li
 static int path_exists(const char *path)
 {
     return access(path, F_OK) == 0;
+}
+
+/* v11: BPF link를 bpffs에 핀해 데몬 프로세스 생사와 무관하게 커널에
+ * 남긴다. 핀 경로에 이전 실행(크래시)이 남긴 핀이 있으면, 이 함수는
+ * "새 link가 이미 attach되어 동작 중인" 시점에 호출되므로 먼저 지워도
+ * 보호 공백이 생기지 않는다. */
+static const char *link_pin_paths[] = {
+    "/sys/fs/bpf/kshield_link_lineage_fork",
+    "/sys/fs/bpf/kshield_link_lineage_exit",
+    "/sys/fs/bpf/kshield_link_shadow_exec",
+    "/sys/fs/bpf/kshield_link_shadow_connect_v4",
+    "/sys/fs/bpf/kshield_link_shadow_connect_v6",
+};
+
+static void pin_link_persistent(struct bpf_link *link, const char *path)
+{
+    if (!link)
+        return;
+    if (path_exists(path) && unlink(path) != 0 && errno != ENOENT)
+        fprintf(stderr, "[경고] 이전 link pin 제거 실패(%s): %s\n", path, strerror(errno));
+    if (bpf_link__pin(link, path))
+        fprintf(stderr, "[경고] link pin 실패(%s): %s\n", path, strerror(errno));
+}
+
+static void pin_all_links(struct kshield_vpatch_bpf *skel)
+{
+    struct bpf_link *links[] = {
+        skel->links.trace_lineage_fork,
+        skel->links.trace_lineage_exit,
+        skel->links.trace_shadow_exec,
+        skel->links.trace_shadow_connect_v4,
+        skel->links.trace_shadow_connect_v6,
+    };
+    for (size_t i = 0; i < sizeof(links) / sizeof(links[0]); i++)
+        pin_link_persistent(links[i], link_pin_paths[i]);
+}
+
+/* SIGINT/SIGTERM 같은 의도된 종료에서만 호출한다 — kill -9는 이 코드를
+ * 타지 않으므로 핀이 그대로 남아 데몬 없이도 계속 보호한다. */
+static void unpin_all_links(struct kshield_vpatch_bpf *skel)
+{
+    struct bpf_link *links[] = {
+        skel->links.trace_lineage_fork,
+        skel->links.trace_lineage_exit,
+        skel->links.trace_shadow_exec,
+        skel->links.trace_shadow_connect_v4,
+        skel->links.trace_shadow_connect_v6,
+    };
+    for (size_t i = 0; i < sizeof(links) / sizeof(links[0]); i++) {
+        if (links[i] && bpf_link__unpin(links[i]))
+            fprintf(stderr, "[경고] link unpin 실패(%s): %s\n", link_pin_paths[i], strerror(errno));
+    }
 }
 
 static const char *default_watched_parents[] = { "raylet", "ray::IDLE", "python3" };
@@ -400,6 +467,8 @@ int main(int argc, char **argv)
         goto cleanup;
     }
 
+    pin_all_links(skel);
+
     backfill_existing_lineage(bpf_map__fd(skel->maps.ai_worker_lineage),
                                bpf_map__fd(skel->maps.watched_parents_map),
                                bpf_map__fd(skel->maps.watched_self_map));
@@ -412,7 +481,7 @@ int main(int argc, char **argv)
         goto cleanup;
     }
 
-    if (signal(SIGINT, sig_handler) == SIG_ERR) {
+    if (signal(SIGINT, sig_handler) == SIG_ERR || signal(SIGTERM, sig_handler) == SIG_ERR) {
         fprintf(stderr, "시그널 핸들러 등록 실패: %s\n", strerror(errno));
         goto cleanup;
     }
@@ -433,6 +502,13 @@ int main(int argc, char **argv)
     err = 0;
 
 cleanup:
+    /* exiting이 참이면 SIGINT/SIGTERM으로 여기 온 것 — 운영자가 의도적으로
+     * 멈춘 것이므로 핀을 지워 실제로 보호가 꺼지게 한다. poll 오류로 여기
+     * 온 경우(exiting이 여전히 거짓)나 load/attach 실패로 온 경우는 핀을
+     * 그대로 둔다(전자는 데몬만 문제여도 커널 쪽 보호는 유지, 후자는 애초에
+     * 핀한 게 없어 무해하다). kill -9는 이 코드 자체를 타지 않는다. */
+    if (exiting)
+        unpin_all_links(skel);
     perf_buffer__free(pb);
     kshield_vpatch_bpf__destroy(skel);
     if (use_syslog)
