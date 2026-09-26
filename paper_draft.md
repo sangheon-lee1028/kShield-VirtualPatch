@@ -425,9 +425,11 @@ $ sudo ./kshield_ctl self-del myworker2
 $ timeout 5 /tmp/myworker2 http://1.1.1.1/   → 종료 코드: 124 (안 잡힘, 정상)
 ```
 
-`parent-add`/`parent-del`, `bin-add`/`bin-del`, `self-add`/`self-del` 세 쌍 모두 데몬 재시작·재컴파일 없이 즉시 반영됨을 확인하였다. 특히 `bin-del` 이후에도 `SHADOW_CONNECT`가 대신 잡아준 결과는, 의심 바이너리 목록에서 빠지더라도 목적지 인지 계층이 여전히 방어선 역할을 한다는 defense-in-depth 설계를 재확인해 준다. `cgroup-exempt-*`는 코드 구현은 완료하였으나 이번 라운드에서 VM 검증까지는 하지 못하였다 — `exempt_uids_map`과 완전히 동일한 코드 경로(핀 → 조회 → `current_is_watched()` 최우선 확인)를 공유하므로 UID 예외가 검증된 것과 같은 신뢰도로 동작할 것으로 예상하나, 실측 확인 전까지는 "검증됨"이라 표기하지 않는다.
+`parent-add`/`parent-del`, `bin-add`/`bin-del`, `self-add`/`self-del` 세 쌍 모두 데몬 재시작·재컴파일 없이 즉시 반영됨을 확인하였다. 특히 `bin-del` 이후에도 `SHADOW_CONNECT`가 대신 잡아준 결과는, 의심 바이너리 목록에서 빠지더라도 목적지 인지 계층이 여전히 방어선 역할을 한다는 defense-in-depth 설계를 재확인해 준다.
 
-**남는 한계**: (1) `cgroup-exempt-*`는 VM 실측 검증이 아직 없다(위 참고). (2) 진짜 쿠버네티스 네임스페이스 단위 예외는 여전히 근본적으로 불가능하다 — cgroup ID는 근사치일 뿐이며, cgroup-to-네임스페이스 매핑을 알려면 K8s API를 감시하는 별도 컨트롤 플레인이 필요하다(범위 밖). (3) syslog의 SIEM 종단 도달 검증은 3.9절과 동일하게 미해결로 남는다. (4) `kshield_ctl`의 하위 명령이 이제 18개(6개 리소스 × 3개 동작)로 늘어나, 다수 규칙을 한 번에 넣는 벌크 가져오기/설정 파일 기능은 아직 없다.
+**`cgroup-exempt-*`의 VM 검증(추가 라운드)**: 처음 구현 당시에는 `exempt_uids_map`과 동일한 코드 경로(핀 → 조회 → `current_is_watched()` 최우선 확인)를 공유한다는 점에만 근거해 VM 검증을 생략하였다. 이번에 실제 cgroup v2 환경에서 직접 확인하였다 — 테스트용 cgroup(`/sys/fs/cgroup/kshield_test_cgroup`, cgroup ID는 해당 디렉터리의 inode 번호로 확인 가능)을 만들고, 그 cgroup 안에서 실행한 공격(`nc`, fork 강제 재현)이 예외 등록 전에는 0.007초 만에 차단되었다. `kshield_ctl cgroup-exempt-add <cgroup_id>`로 등록한 뒤 같은 cgroup에서 재현하자 차단되지 않고 `nc` 자신의 타임아웃(2초, 실측 2.010초)까지 그대로 실행되었고, `cgroup-exempt-del`로 삭제한 뒤에는 다시 0.006초 만에 차단됨을 확인하였다 — `exempt_uids_map`과 동일한 신뢰도로 동작함을 실측으로 확정하였다.
+
+**남는 한계**: (1) 진짜 쿠버네티스 네임스페이스 단위 예외는 여전히 근본적으로 불가능하다 — cgroup ID는 근사치일 뿐이며, cgroup-to-네임스페이스 매핑을 알려면 K8s API를 감시하는 별도 컨트롤 플레인이 필요하다(범위 밖). (2) syslog의 SIEM 종단 도달 검증은 3.9절과 동일하게 미해결로 남는다. (3) `kshield_ctl`의 하위 명령이 이제 18개(6개 리소스 × 3개 동작)로 늘어나, 다수 규칙을 한 번에 넣는 벌크 가져오기/설정 파일 기능은 아직 없다.
 
 ### 3.11 v11 — 데몬 크래시 시 fail-open 문제와 BPF link 핀
 
@@ -843,7 +845,6 @@ Falco·Tetragon에 같은 판정을 이식해 같은 VM·세션에서 비교한 
 
 **적용 범위 확장 (우선순위 낮음)**
 - **다른 CVE로의 일반화**: 4.6절에서 TorchServe(CVE-2023-43654)·MLflow(CVE-2024-37054)·Triton(CVE-2023-31036)·vLLM(CVE-2025-66448)·BentoML(CVE-2024-2912/2025-27520)·Gradio(CVE-2024-1561)·text-generation-webui(CVE-2025-12487/88) 일곱 사례에 대해 커널 코드 변경 없이 `kshield_ctl parent-add` 런타임 등록만으로 탐지됨을 예비 확인하였고, 4.6.1절에서 같은 일곱 사례에 대해 Falco·Tetragon도 룰/정책에 이름·경로만 추가하면 동일하게 탐지함을 확인하였다. 다만 전부 1회 기능 확인에 그쳐, 4.3~4.5절 수준의 반복 통계 측정과 세 도구 간 오버헤드·성능 비교는 아직 없다. 일곱 프레임워크 모두 이 수준까지 검증을 넓힐 필요가 있으며, 아직 다루지 않은 다른 CVE·프레임워크로도 계속 확장할 수 있다.
-- **cgroup 단위 예외의 VM 검증**: v10(3.10절)에서 `exempt_cgroups_map`을 구현하였으나, `exempt_uids_map`(검증됨)과 동일한 코드 경로를 공유한다는 점에만 근거해 검증을 생략하였다 — 실제 cgroup ID를 이용한 VM 실측이 필요하다.
 - **진짜 쿠버네티스 네임스페이스 인지**: v10의 cgroup 단위 예외는 "네임스페이스"의 근사치일 뿐이다. cgroup ID를 실제 K8s 네임스페이스로 매핑하려면 K8s API 서버를 감시하는 별도 컨트롤 플레인이 필요하며, 이는 현재 범위를 크게 벗어난다.
 - **syslog 연동의 종단 검증**: `--syslog`(3.9절)는 로컬 syslog 소켓에 JSON이 정확히 기록되는 것까지만 확인하였다. 실제 rsyslog/journald 포워더를 거쳐 SIEM(Splunk, ELK 등)까지 도달·파싱되는지는 검증하지 않았다.
 - **`kshield_ctl` 대량 설정 지원**: v10부터 하위 명령이 18개(6개 리소스 × 3개 동작)로 늘어났다. 여러 규칙을 한 번에 넣는 설정 파일/벌크 가져오기 기능은 아직 없다.
