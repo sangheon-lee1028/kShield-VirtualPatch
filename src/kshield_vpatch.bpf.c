@@ -73,6 +73,16 @@
  *     없이 기존 defense-in-depth 구조(exec 계층/connect 계층)를 그대로
  *     재활용한 것이다. nc/ncat은 AI 워커 계보에서 합법적 용도가 사실상
  *     없어(리버스/바인드 셸 목적이 대부분) exec 즉시 차단을 유지한다.
+ *
+ * v13 재검토 (실제 Ray 클러스터 검증 중 발견): 실제 Ray 클러스터를 이
+ * 도구로 보호하려는 첫 시도에서, raylet 자신이 GCS로 접속할 때 IPv4가
+ * 아니라 IPv4-mapped IPv6 주소(::ffff:a.b.c.d)로 먼저 연결을 시도하는
+ * 경우가 있음을 실측으로 발견하였다. trace_shadow_connect_v6는 애초에
+ * IPv6 목적지에 대한 신뢰 목록이 없어(loopback ::1만 예외), IPv4 쪽
+ * trusted_dst_ipv4_map에 목적지를 등록해 두어도 이 IPv6 경로에서
+ * 무조건 차단되는 문제가 있었다. 뒤 4바이트에 담긴 실제 IPv4 주소를
+ * 꺼내 기존 trusted_dst_ipv4_map으로 판정하도록 trace_shadow_connect_v6를
+ * 보강하였다 — 자세한 내용은 해당 함수의 주석 참고.
  */
 #include "vmlinux.h"
 #include <bpf/bpf_helpers.h>
@@ -445,14 +455,6 @@ int BPF_KPROBE(trace_shadow_connect_v4, struct sock *sk, struct sockaddr *uaddr,
 
     __u32 dst_addr = bpf_ntohl(dst_addr_be);
 
-    /* TEMP DEBUG: 0.0.0.0 신뢰 등록 미스터리 진단용. bpftool prog tracelog로 확인 후 제거할 것. */
-    {
-        __u32 dbg_pid = bpf_get_current_pid_tgid() >> 32;
-        int dbg_trusted = is_loopback_or_trusted(dst_addr);
-        bpf_printk("KSHIELD_DBG pid=%d dst_addr_raw=%u dst_port_be=%d trusted=%d\n",
-                   dbg_pid, dst_addr, dst_port_be, dbg_trusted);
-    }
-
     if (is_loopback_or_trusted(dst_addr))
         return 0;
 
@@ -503,19 +505,40 @@ int BPF_KPROBE(trace_shadow_connect_v6, struct sock *sk, struct sockaddr *uaddr,
     if (is_v6_loopback && addr6.in6_u.u6_addr8[15] != 1)
         is_v6_loopback = 0;
 
-    /* TEMP DEBUG: 0.0.0.0 신뢰 등록 미스터리 진단용. 확인 후 제거할 것. */
-    {
-        __u32 dbg_pid = bpf_get_current_pid_tgid() >> 32;
-        __u32 last4 = ((__u32)addr6.in6_u.u6_addr8[12] << 24) | ((__u32)addr6.in6_u.u6_addr8[13] << 16) |
-                      ((__u32)addr6.in6_u.u6_addr8[14] << 8) | (__u32)addr6.in6_u.u6_addr8[15];
-        bpf_printk("KSHIELD_DBG_V6 pid=%d loopback=%d last4_hex=%x\n", dbg_pid, is_v6_loopback, last4);
-    }
-
     if (is_v6_loopback)
         return 0;
 
-    /* TODO(향후 연구): IPv6 목적지용 trusted 목록은 아직 없다.
-     * 현재는 IPv4와 달리 loopback 외 모든 v6 목적지를 의심으로 간주한다. */
+    /* v13 재검토: 실제 Ray 클러스터 검증 중, dual-stack 애플리케이션(Ray의
+     * gRPC 클라이언트)이 신뢰 목적지 IP(예: GCS 서버 자신의 IP)로 접속할
+     * 때도 IPv4-mapped IPv6 주소(::ffff:a.b.c.d, ::ffff:0:0/96 대역)로
+     * 먼저 시도하는 경우가 실측으로 확인되었다 — 이 경로는 신뢰 목록
+     * 확인 없이 무조건 차단되어, kshield_ctl trust-add로 IPv4 신뢰
+     * 목적지를 등록해도 실제로는 보호되지 않는(SIGKILL이 날아가는)
+     * 문제가 있었다. 앞 10바이트가 0이고 그다음 2바이트가 0xffff이면
+     * IPv4-mapped 주소이므로, 뒤 4바이트의 실제 IPv4 주소를 꺼내 기존
+     * trusted_dst_ipv4_map으로 그대로 판정한다 — 별도의 IPv6 전용 맵을
+     * 새로 만들지 않고 이미 검증된 IPv4 신뢰 목록을 재사용한다. */
+    int is_v4_mapped = 1;
+    for (int i = 0; i < 10; i++) {
+        if (addr6.in6_u.u6_addr8[i] != 0) { is_v4_mapped = 0; break; }
+    }
+    if (is_v4_mapped &&
+        (addr6.in6_u.u6_addr8[10] != 0xff || addr6.in6_u.u6_addr8[11] != 0xff))
+        is_v4_mapped = 0;
+
+    if (is_v4_mapped) {
+        __u32 mapped_v4 = ((__u32)addr6.in6_u.u6_addr8[12] << 24) |
+                           ((__u32)addr6.in6_u.u6_addr8[13] << 16) |
+                           ((__u32)addr6.in6_u.u6_addr8[14] << 8) |
+                           (__u32)addr6.in6_u.u6_addr8[15];
+        if (is_loopback_or_trusted(mapped_v4))
+            return 0;
+    }
+
+    /* TODO(향후 연구): 순수 IPv6 목적지(예: 2001:db8::1처럼 IPv4-mapped가
+     * 아닌 진짜 v6 주소)용 신뢰 목록은 여전히 없다. 현재는 loopback과
+     * IPv4-mapped-후-신뢰됨 두 경우를 제외한 모든 v6 목적지를 의심으로
+     * 간주한다. */
 
     struct task_struct *task = (struct task_struct *)bpf_get_current_task();
     struct task_struct *parent = BPF_CORE_READ(task, real_parent);
