@@ -25,6 +25,17 @@
  * v10: watched_parents_map/watched_self_map/suspicious_bins_map/
  * exempt_cgroups_map도 핀한다(kshield_vpatch.c와 동일한 이유 — 상세
  * 근거는 그 파일 참고).
+ *
+ * v11: kshield_vpatch.c에 적용한 것과 동일한 수정 — 맵만 핀하고 BPF
+ * 프로그램의 부착(link) 자체는 핀하지 않아, 데몬을 kill -9로 죽이면
+ * bprm_check_security/socket_connect LSM 훅이 커널에서 통째로 사라지는
+ * fail-open임을 VM에서 직접 확인하였다(강제 종료 전엔 execve(nc)가
+ * 0.008초 만에 -EPERM으로 즉시 실패했으나, 강제 종료 후엔 같은 시도가
+ * 2.010초 동안 실제로 실행되어 fail-open을 재현). 네 개 프로그램
+ * (trace_lineage_fork/exit, kshield_lsm_bprm_check,
+ * kshield_lsm_socket_connect)의 link를 bpffs에 핀해 kshield_vpatch.c와
+ * 동일한 방식(재시작 시 새 attach 먼저 → 옛 핀 제거, SIGINT/SIGTERM
+ * 에서만 명시적 unpin)으로 고쳤다.
  */
 #include <stdio.h>
 #include <signal.h>
@@ -177,6 +188,52 @@ static int libbpf_print_fn(enum libbpf_print_level level, const char *fmt, va_li
 static int path_exists(const char *path)
 {
     return access(path, F_OK) == 0;
+}
+
+/* v11: kshield_vpatch.c와 동일한 이유·순서 — 상세 근거는 그 파일 참고. */
+static const char *link_pin_paths[] = {
+    "/sys/fs/bpf/kshield_link_lsm_lineage_fork",
+    "/sys/fs/bpf/kshield_link_lsm_lineage_exit",
+    "/sys/fs/bpf/kshield_link_lsm_bprm_check",
+    "/sys/fs/bpf/kshield_link_lsm_socket_connect",
+};
+
+static void pin_link_persistent(struct bpf_link *link, const char *path)
+{
+    if (!link)
+        return;
+    if (path_exists(path) && unlink(path) != 0 && errno != ENOENT)
+        fprintf(stderr, "[경고] 이전 link pin 제거 실패(%s): %s\n", path, strerror(errno));
+    if (bpf_link__pin(link, path))
+        fprintf(stderr, "[경고] link pin 실패(%s): %s\n", path, strerror(errno));
+}
+
+static void pin_all_links(struct kshield_vpatch_lsm_bpf *skel)
+{
+    struct bpf_link *links[] = {
+        skel->links.trace_lineage_fork,
+        skel->links.trace_lineage_exit,
+        skel->links.kshield_lsm_bprm_check,
+        skel->links.kshield_lsm_socket_connect,
+    };
+    for (size_t i = 0; i < sizeof(links) / sizeof(links[0]); i++)
+        pin_link_persistent(links[i], link_pin_paths[i]);
+}
+
+/* SIGINT/SIGTERM 같은 의도된 종료에서만 호출한다 — kill -9는 이 코드를
+ * 타지 않으므로 핀이 그대로 남아 데몬 없이도 계속 보호한다. */
+static void unpin_all_links(struct kshield_vpatch_lsm_bpf *skel)
+{
+    struct bpf_link *links[] = {
+        skel->links.trace_lineage_fork,
+        skel->links.trace_lineage_exit,
+        skel->links.kshield_lsm_bprm_check,
+        skel->links.kshield_lsm_socket_connect,
+    };
+    for (size_t i = 0; i < sizeof(links) / sizeof(links[0]); i++) {
+        if (links[i] && bpf_link__unpin(links[i]))
+            fprintf(stderr, "[경고] link unpin 실패(%s): %s\n", link_pin_paths[i], strerror(errno));
+    }
 }
 
 static const char *default_watched_parents[] = { "raylet", "ray::IDLE", "python3" };
@@ -409,6 +466,8 @@ int main(int argc, char **argv)
         goto cleanup;
     }
 
+    pin_all_links(skel);
+
     backfill_existing_lineage(bpf_map__fd(skel->maps.ai_worker_lineage),
                                bpf_map__fd(skel->maps.watched_parents_map),
                                bpf_map__fd(skel->maps.watched_self_map));
@@ -421,7 +480,7 @@ int main(int argc, char **argv)
         goto cleanup;
     }
 
-    if (signal(SIGINT, sig_handler) == SIG_ERR) {
+    if (signal(SIGINT, sig_handler) == SIG_ERR || signal(SIGTERM, sig_handler) == SIG_ERR) {
         fprintf(stderr, "시그널 핸들러 등록 실패: %s\n", strerror(errno));
         goto cleanup;
     }
@@ -443,6 +502,10 @@ int main(int argc, char **argv)
     err = 0;
 
 cleanup:
+    /* exiting이 참이면 SIGINT/SIGTERM으로 여기 온 것(의도된 종료) — 핀을
+     * 지워 실제로 보호가 꺼지게 한다. kill -9는 이 코드 자체를 안 탄다. */
+    if (exiting)
+        unpin_all_links(skel);
     perf_buffer__free(pb);
     kshield_vpatch_lsm_bpf__destroy(skel);
     if (use_syslog)
