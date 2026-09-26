@@ -456,6 +456,11 @@ int main(int argc, char **argv)
     if (bpf_map__set_pin_path(skel->maps.exempt_cgroups_map, "/sys/fs/bpf/kshield_exempt_cgroups_v3"))
         fprintf(stderr, "[경고] exempt_cgroups_map pin 경로 설정 실패: %s\n", strerror(errno));
 
+    /* fork/exit 훅 자체의 실행 시간을 정밀 측정하기 위한 통계 맵도 핀해
+     * kshield_ctl이 데몬 재시작 없이 읽을 수 있게 한다(4.4절 정밀 계측). */
+    if (bpf_map__set_pin_path(skel->maps.hook_timing_map, "/sys/fs/bpf/kshield_hook_timing_v3"))
+        fprintf(stderr, "[경고] hook_timing_map pin 경로 설정 실패: %s\n", strerror(errno));
+
     err = kshield_vpatch_bpf__load(skel);
     if (err) {
         fprintf(stderr, "BPF 스켈레톤 로드 실패: %d\n", err);

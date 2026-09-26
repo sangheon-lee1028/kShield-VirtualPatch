@@ -203,6 +203,41 @@ struct {
     __type(value, __u8);
 } exempt_cgroups_map SEC(".maps");
 
+/* 4.4절의 per-fork 오버헤드 추정(job당 fork 50배 워크로드에서 약
+ * 0.2마이크로초/fork)은 end-to-end HTTP 지연시간 기준의 거친 추정치였다
+ * — sched_process_fork/sched_process_exit 훅 자체의 실행 시간과, 그
+ * 사이에 낀 스케줄링·syscall·HTTP 왕복 등 다른 모든 비용을 분리하지
+ * 못했다. bpf_ktime_get_ns()로 각 훅의 진입/종료 시각을 커널 내부에서
+ * 직접 정밀 격리 측정해 이 추정치를 검증한다(새 판정 로직이 아니라
+ * 기존 두 훅에 대한 계측 추가이므로 별도 버전 번호를 매기지 않는다).
+ * PERCPU_ARRAY를 쓰는 이유는 CPU마다 별도 슬롯에 누적해 락 경합 없이
+ * 갱신하기 위함이며, 여러 CPU의 값은 유저스페이스(kshield_ctl)가
+ * 합산한다. key 0=fork 훅, key 1=exit 훅. */
+struct hook_timing_stats {
+    __u64 total_ns;
+    __u64 count;
+};
+
+struct {
+    __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+    __uint(max_entries, 2);
+    __type(key, __u32);
+    __type(value, struct hook_timing_stats);
+} hook_timing_map SEC(".maps");
+
+#define TIMING_KEY_FORK 0
+#define TIMING_KEY_EXIT 1
+
+static __always_inline void record_hook_timing(__u32 key, __u64 t0)
+{
+    __u64 t1 = bpf_ktime_get_ns();
+    struct hook_timing_stats *st = bpf_map_lookup_elem(&hook_timing_map, &key);
+    if (st) {
+        st->total_ns += (t1 - t0);
+        st->count += 1;
+    }
+}
+
 static __always_inline int is_watched_comm(const char *comm)
 {
     return bpf_map_lookup_elem(&watched_parents_map, comm) != NULL;
@@ -268,6 +303,8 @@ static __always_inline int current_is_watched(char (*parent_comm_out)[MAX_COMM_L
 SEC("tp/sched/sched_process_fork")
 int trace_lineage_fork(struct trace_event_raw_sched_process_fork *ctx)
 {
+    __u64 t0 = bpf_ktime_get_ns();
+
     __u32 parent_pid = ctx->parent_pid;
     __u32 child_pid  = ctx->child_pid;
 
@@ -281,6 +318,7 @@ int trace_lineage_fork(struct trace_event_raw_sched_process_fork *ctx)
         bpf_map_update_elem(&ai_worker_lineage, &child_pid, &flag, BPF_ANY);
     }
 
+    record_hook_timing(TIMING_KEY_FORK, t0);
     return 0;
 }
 
@@ -289,8 +327,10 @@ int trace_lineage_fork(struct trace_event_raw_sched_process_fork *ctx)
 SEC("tp/sched/sched_process_exit")
 int trace_lineage_exit(void *ctx)
 {
+    __u64 t0 = bpf_ktime_get_ns();
     __u32 pid = bpf_get_current_pid_tgid() >> 32;
     bpf_map_delete_elem(&ai_worker_lineage, &pid);
+    record_hook_timing(TIMING_KEY_EXIT, t0);
     return 0;
 }
 

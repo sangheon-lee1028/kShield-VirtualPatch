@@ -50,6 +50,7 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <bpf/bpf.h>
+#include <bpf/libbpf.h>
 
 #define KEY_COMM_LEN 16
 #define KEY_PATH_LEN 64
@@ -94,8 +95,65 @@ static void print_usage(const char *prog)
         "  parent-add/parent-del/parent-list <comm>       감시 대상 프로세스명(자손 계보용)\n"
         "  self-add/self-del/self-list <comm>             감시 대상 프로세스명(자기 자신용)\n"
         "  bin-add/bin-del/bin-list <path>                의심 바이너리 경로\n"
-        "(<값>은 *-list 명령에는 필요 없음)\n",
+        "  fork-timing-stats                              fork/exit 훅 정밀 실행시간 통계(kshield_vpatch 전용)\n"
+        "(<값>은 *-list, fork-timing-stats 명령에는 필요 없음)\n",
         prog);
+}
+
+/* fork/exit 훅 자체의 실행 시간(bpf_ktime_get_ns() 기반) 통계를 읽어
+ * 평균 ns/호출을 출력한다. PERCPU_ARRAY이므로 CPU 개수만큼의 값이
+ * 이어져 나오며, 여기서 전부 합산한다. LSM 컴포넌트는 이 맵이 없으므로
+ * kshield_vpatch(v3) 전용이다. */
+struct hook_timing_stats {
+    unsigned long long total_ns;
+    unsigned long long count;
+};
+
+static void print_fork_timing_stats(void)
+{
+    const char *path = "/sys/fs/bpf/kshield_hook_timing_v3";
+    int fd = bpf_obj_get(path);
+    if (fd < 0) {
+        fprintf(stderr, "[오류] %s 열기 실패(kshield_vpatch 미실행?): %s\n",
+                path, strerror(errno));
+        return;
+    }
+
+    int ncpus = libbpf_num_possible_cpus();
+    if (ncpus <= 0) {
+        fprintf(stderr, "[오류] CPU 개수 조회 실패\n");
+        close(fd);
+        return;
+    }
+
+    struct hook_timing_stats *percpu_vals = calloc(ncpus, sizeof(*percpu_vals));
+    if (!percpu_vals) {
+        fprintf(stderr, "[오류] 메모리 할당 실패\n");
+        close(fd);
+        return;
+    }
+
+    static const char *labels[2] = { "fork(sched_process_fork)", "exit(sched_process_exit)" };
+    for (__u32 key = 0; key < 2; key++) {
+        if (bpf_map_lookup_elem(fd, &key, percpu_vals) != 0) {
+            fprintf(stderr, "[오류] key=%u 조회 실패: %s\n", key, strerror(errno));
+            continue;
+        }
+        unsigned long long total_ns = 0, count = 0;
+        for (int c = 0; c < ncpus; c++) {
+            total_ns += percpu_vals[c].total_ns;
+            count    += percpu_vals[c].count;
+        }
+        if (count == 0) {
+            printf("%-28s: 호출 없음\n", labels[key]);
+        } else {
+            printf("%-28s: %llu회 호출, 총 %llu ns, 평균 %.1f ns/호출\n",
+                   labels[key], count, total_ns, (double)total_ns / (double)count);
+        }
+    }
+
+    free(percpu_vals);
+    close(fd);
 }
 
 /* ---- 고정폭 정수 키(IP 4B / UID 4B / cgroup ID 8B) 리소스 ---- */
@@ -247,6 +305,11 @@ int main(int argc, char **argv)
     }
 
     const char *cmd = argv[1];
+
+    if (strcmp(cmd, "fork-timing-stats") == 0) {
+        print_fork_timing_stats();
+        return 0;
+    }
     const char *action;
     const char *target_sel = "both";
     const char *value = NULL;
