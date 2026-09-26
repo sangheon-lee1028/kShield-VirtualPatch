@@ -49,6 +49,14 @@
  * 종료에서는 운영자가 실제로 보호를 끄고 싶은 것이므로 종료 직전에 핀을
  * 명시적으로 지운다 — SIGKILL은 애초에 핸들러를 타지 않으므로 이 경로를
  * 거치지 않고, 그래서 핀이 그대로 남아 계속 보호한다(의도한 동작).
+ *
+ * v12: v11 재측정 중, watched_self[]가 fork 없는 self-exec 치환(bash가
+ * 자기 자신을 execve()로 다른 바이너리로 치환)을 놓치는 문제를
+ * 발견하였다 — 자세한 원인은 kshield_vpatch.bpf.c의 trace_lineage_selfexec
+ * 주석 참고. 새 BPF 프로그램(tp/syscalls/sys_enter_execve)을 추가해
+ * execve() 진입 시점(comm이 바뀌기 전)에 미리 계보 등록을 하도록
+ * 고쳤으며, 이 link도 다른 다섯 개와 동일하게 pin/unpin 대상에
+ * 포함시켰다.
  */
 #include <stdio.h>
 #include <signal.h>
@@ -180,6 +188,7 @@ static int path_exists(const char *path)
 static const char *link_pin_paths[] = {
     "/sys/fs/bpf/kshield_link_lineage_fork",
     "/sys/fs/bpf/kshield_link_lineage_exit",
+    "/sys/fs/bpf/kshield_link_lineage_selfexec",
     "/sys/fs/bpf/kshield_link_shadow_exec",
     "/sys/fs/bpf/kshield_link_shadow_connect_v4",
     "/sys/fs/bpf/kshield_link_shadow_connect_v6",
@@ -200,6 +209,7 @@ static void pin_all_links(struct kshield_vpatch_bpf *skel)
     struct bpf_link *links[] = {
         skel->links.trace_lineage_fork,
         skel->links.trace_lineage_exit,
+        skel->links.trace_lineage_selfexec,
         skel->links.trace_shadow_exec,
         skel->links.trace_shadow_connect_v4,
         skel->links.trace_shadow_connect_v6,
@@ -215,6 +225,7 @@ static void unpin_all_links(struct kshield_vpatch_bpf *skel)
     struct bpf_link *links[] = {
         skel->links.trace_lineage_fork,
         skel->links.trace_lineage_exit,
+        skel->links.trace_lineage_selfexec,
         skel->links.trace_shadow_exec,
         skel->links.trace_shadow_connect_v4,
         skel->links.trace_shadow_connect_v6,

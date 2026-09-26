@@ -294,6 +294,48 @@ int trace_lineage_exit(void *ctx)
     return 0;
 }
 
+/* v12 재검토: watched_self[]가 fork 없는 self-exec 치환(예: bash -c
+ * '<단일 명령>'이 자기 자신을 execve()로 다른 바이너리로 치환하는
+ * 최적화)을 놓치는 문제를 3.11절 재측정 중 발견하였다.
+ * tp/sched/sched_process_exec는 execve() 완료 *이후*에 발동하므로, 그
+ * 시점엔 이미 comm이 (예: raylet에서 nc로) 바뀌어 있어
+ * watched_self_map 매칭이 실패하고, fork가 없었으니
+ * ai_worker_lineage에도 등록되지 않는다 — 결과적으로 어느 훅도 이
+ * 프로세스를 감시 대상으로 인식하지 못한다. kshield_vpatch_lsm의
+ * bprm_check_security는 execve() *이전*에 발동해(comm이 아직 바뀌지
+ * 않음) 같은 self_comm 검사가 그대로 통과하므로 이 문제가 없다.
+ *
+ * execve() 진입 시점(comm이 바뀌기 전)에 훅을 하나 추가해, 그 시점의
+ * comm이 watched_self_map과 일치하면 미리 ai_worker_lineage에 등록해
+ * 둔다 — 이후 실제 exec가 완료되면 trace_shadow_exec와
+ * trace_shadow_connect_v4/v6는 이미 채워진 lineage를 그대로 보고
+ * 정상 동작하므로, 그쪽 코드는 손댈 필요가 없다. */
+SEC("tp/syscalls/sys_enter_execve")
+int trace_lineage_selfexec(void *ctx)
+{
+    __u32 pid = bpf_get_current_pid_tgid() >> 32;
+
+    if (bpf_map_lookup_elem(&ai_worker_lineage, &pid) != NULL)
+        return 0;
+
+    __u32 uid = (__u32)bpf_get_current_uid_gid();
+    if (bpf_map_lookup_elem(&exempt_uids_map, &uid) != NULL)
+        return 0;
+
+    __u64 cgroup_id = bpf_get_current_cgroup_id();
+    if (bpf_map_lookup_elem(&exempt_cgroups_map, &cgroup_id) != NULL)
+        return 0;
+
+    char self_comm[MAX_COMM_LEN] = {};
+    bpf_get_current_comm(&self_comm, sizeof(self_comm));
+    if (!is_watched_self(self_comm))
+        return 0;
+
+    __u8 flag = 1;
+    bpf_map_update_elem(&ai_worker_lineage, &pid, &flag, BPF_ANY);
+    return 0;
+}
+
 SEC("tp/sched/sched_process_exec")
 int trace_shadow_exec(struct trace_event_raw_sched_process_exec *ctx)
 {
