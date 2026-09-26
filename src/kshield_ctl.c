@@ -5,16 +5,16 @@
  * kshield_vpatch/kshield_vpatch_lsm이 핀(pin)해 둔 BPF map들을 데몬
  * 재시작·재컴파일 없이 조회/수정한다.
  *
- *   - trusted_dst_ipv4_map (v8): 신뢰 목적지 IP.
- *   - exempt_uids_map (v9): 감시 예외 UID. GPU를 오래 점유하는 job을
+ *   - trusted_dst_ipv4_map (2차): 신뢰 목적지 IP.
+ *   - exempt_uids_map (3차): 감시 예외 UID. GPU를 오래 점유하는 job을
  *     오탐으로 SIGKILL했을 때의 비용이 크다는 점을 반영해, 검증된
  *     사용자 단위로 감시 자체를 예외 처리할 수 있게 한다.
- *   - exempt_cgroups_map (v10): 감시 예외 cgroup ID. UID보다 더 세밀한
+ *   - exempt_cgroups_map (4차): 감시 예외 cgroup ID. UID보다 더 세밀한
  *     컨테이너/파드 단위 예외. 쿠버네티스 "네임스페이스" 자체는 커널이
  *     아는 개념이 아니라 K8s API 서버가 관리하는 논리적 그룹이라
  *     eBPF에서 직접 관측할 수 없으므로, 컨테이너/파드 하나하나가 보통
  *     자신만의 cgroup을 갖는다는 점을 이용한 근사치다.
- *   - watched_parents_map/watched_self_map/suspicious_bins_map (v10):
+ *   - watched_parents_map/watched_self_map/suspicious_bins_map (4차):
  *     감시 대상 프로세스명·의심 바이너리 목록. 새 CVE 대응이나 감시
  *     대상 프레임워크 변경 때마다 재컴파일해야 했던 문제를 해소한다.
  *
@@ -31,7 +31,7 @@
  *   kshield_ctl parent-add <comm> [--target v3|lsm|both]         감시 대상 프로세스명(자손 계보용)
  *   kshield_ctl parent-del <comm> [--target v3|lsm|both]
  *   kshield_ctl parent-list [--target v3|lsm|both]
- *   kshield_ctl self-add <comm> [--target v3|lsm|both]           감시 대상 프로세스명(자기 자신용, v6)
+ *   kshield_ctl self-add <comm> [--target v3|lsm|both]           감시 대상 프로세스명(자기 자신용)
  *   kshield_ctl self-del <comm> [--target v3|lsm|both]
  *   kshield_ctl self-list [--target v3|lsm|both]
  *   kshield_ctl bin-add <path> [--target v3|lsm|both]            의심 바이너리 경로

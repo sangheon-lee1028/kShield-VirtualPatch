@@ -6,44 +6,35 @@ lsh66404865@gmail.com
 
 > **작성 상태 안내**: 1~4장(서론, 관련 연구, 설계, 실험)이 VM 실측을 거쳐
 > 완성되었고, 참고문헌은 웹 검색으로 실제 URL·발행일자를 확인하여 정리하였다.
-> 이후 LSM 훅 기반 동기적 사전 차단 컴포넌트(3.5절)를 추가하였으며, 기능
-> 검증(빌드·attach·차단 동작)과 성능 오버헤드 측정(4.4절, 비활성/v3/v3+LSM
-> 3개 그룹, AI 워커 계보와 무관한 프로세스에 대한 영향 포함)까지 VM에서
-> 완료하였다. 이 과정에서 v3(3.3절)에도 있던 실행 파일 블록리스트 누락
-> 버그를 함께 발견·수정하였다. 추가로 fork 집약적 워크로드에서는 처음으로
-> 통계적으로 유의미하지만 작은 오버헤드(처리량 −0.67%, 지연시간 +0.7%)를
-> 관측하여, 오버헤드가 워크로드의 fork 빈도에 비례한다는 점을 확인하였다.
-> 이후 두 가지 설계를 추가 재검토하였다(3.6절): (1) curl/wget은 실제 AI
-> 워크로드에서 모델·데이터셋 다운로드에도 쓰이는 이중 용도 도구이므로
-> 실행 파일 이름만으로 즉시 차단하면 정당한 다운로드까지 오탐 처리되는
-> 문제를 발견하여, 판단을 목적지 인지 계층(SHADOW_CONNECT/LSM
-> socket_connect)에 넘기도록 재설계하였다. (2) 신규 룰을 먼저 "탐지만
-> 하고 차단은 안 함"으로 배포할 수 있는 audit-only 모드를 추가하였다.
-> 두 변경 모두 VM에서 기능 검증을 완료하였다. 이후 제출 전 자체 검토
-> 과정에서 감시 대상 프로세스 자신이 fork 없이 직접 행위를 하면 어느
-> 훅도 감지하지 못하는 구조적 공백을 발견하여 `watched_self[]` 기반의
-> 자기 자신 검사를 추가하였고(3.7절, v6), VM에서 기능 검증을 완료하였다.
-> 이후 기획 관점 재검토에서 데몬이 클러스터보다 나중에 뜨거나 재시작되면
-> 계보 정보가 유실되는 문제를 추가로 발견하여, 유저스페이스 로더가
-> 기동 시 `/proc`을 스캔해 계보를 백필하도록 수정하였고(3.8절, v7),
-> 직속 부모 검사로는 잡을 수 없는 2단계 손자뻘 체인으로 VM 재현·검증을
-> 완료하였다. 이어서 리뷰어 성격의 지적 세 가지(하드코딩된 rodata
-> 룰, SIEM 미연동, GPU 오탐 비용에 대응할 세밀한 예외 부재)를 한 번에
-> 다루어(3.9절, v8/v9), 신뢰 목적지 IP를 BPF map + `kshield_ctl`로
-> 런타임 관리하도록 바꾸고, `--syslog` 플래그로 JSON 이벤트를 syslog에
-> 남기며, UID 단위 감시 예외(`exempt_uids_map`)를 추가하였다. 6회의
-> curl 시도에 신뢰 IP·예외 UID 등록/해제를 끼워 넣어 재시작 없이
-> 즉시 반영됨을 VM에서 재현·검증하였다. 마지막으로 남아 있던
+> 기본 탐지 구조(계보 추적, SHADOW_EXEC/SHADOW_CONNECT, 오탐 방지, 자기 자신
+> 직접 행위 탐지)는 3.3절에 통합 서술하였다. 이후 LSM 훅 기반 동기적 사전
+> 차단 컴포넌트(3.5절)를 추가하였으며, 기능 검증(빌드·attach·차단 동작)과
+> 성능 오버헤드 측정(4.4절, 비활성/v3/v3+LSM 3개 그룹, AI 워커 계보와 무관한
+> 프로세스에 대한 영향 포함)까지 VM에서 완료하였다. 이 과정에서 v3(3.3절)에도
+> 있던 실행 파일 블록리스트 누락 버그를 함께 발견·수정하였다. 추가로 fork
+> 집약적 워크로드에서는 처음으로 통계적으로 유의미하지만 작은 오버헤드
+> (처리량 −0.67%, 지연시간 +0.7%)를 관측하여, 오버헤드가 워크로드의 fork
+> 빈도에 비례한다는 점을 확인하였다. 이후 기획 관점 재검토에서 데몬이
+> 클러스터보다 나중에 뜨거나 재시작되면 계보 정보가 유실되는 문제를 발견하여,
+> 유저스페이스 로더가 기동 시 `/proc`을 스캔해 계보를 백필하도록
+> 수정하였고(3.6절, 1차), 직속 부모 검사로는 잡을 수 없는 2단계 손자뻘
+> 체인으로 VM 재현·검증을 완료하였다. 이어서 리뷰어 성격의 지적 세
+> 가지(하드코딩된 rodata 룰, SIEM 미연동, GPU 오탐 비용에 대응할 세밀한
+> 예외 부재)를 한 번에 다루어(3.7절, 2차/3차), 신뢰 목적지 IP를 BPF map +
+> `kshield_ctl`로 런타임 관리하도록 바꾸고, `--syslog` 플래그로 JSON
+> 이벤트를 syslog에 남기며, UID 단위 감시 예외(`exempt_uids_map`)를
+> 추가하였다. 6회의 curl 시도에 신뢰 IP·예외 UID 등록/해제를 끼워 넣어
+> 재시작 없이 즉시 반영됨을 VM에서 재현·검증하였다. 마지막으로 남아 있던
 > `watched_parents[]`/`watched_self[]`/`suspicious_bins[]`도 동일한
-> 방식으로 BPF map화하고 cgroup 단위 감시 예외를 추가하였으며(3.10절,
-> v10), 새 감시 대상 프로세스명·의심 바이너리 등록/해제가 재시작 없이
+> 방식으로 BPF map화하고 cgroup 단위 감시 예외를 추가하였으며(3.8절,
+> 4차), 새 감시 대상 프로세스명·의심 바이너리 등록/해제가 재시작 없이
 > 즉시 반영됨을 VM에서 검증하였다(cgroup 단위 예외는 코드 구현만
 > 완료, VM 검증은 향후 과제). 제출 직전, Falco·Tetragon과 "데몬이
 > 죽으면 어떻게 되는가"를 대조하다 kShield-VirtualPatch가 데몬을
 > `kill -9`로 강제 종료하면 커널의 BPF 프로그램까지 통째로 사라지는
 > fail-open임을 발견하였다(Tetragon은 데몬이 죽어 있는 동안에도 커널
 > 쪽 차단이 계속됨을 확인). 다섯 개 프로그램의 attach를 `bpffs`에
-> 핀해 데몬 생사와 무관하게 커널에 남도록 고쳤고(3.11절, v11), 수정
+> 핀해 데몬 생사와 무관하게 커널에 남도록 고쳤고(3.9절, 5차), 수정
 > 후 `kill -9`에도 5개 프로그램이 전부 잔존하며 공격이 여전히
 > 차단됨을, 반대로 SIGTERM 같은 의도된 종료에서는 핀이 실제로
 > 사라짐을 VM에서 검증하였다.
@@ -54,7 +45,7 @@ lsh66404865@gmail.com
 
 AI 서빙 프레임워크(Ray, vLLM, Triton 등)에서 발견되는 원격 코드 실행(RCE) 취약점은 벤더의 패치 대응이 지연되거나, 조직 내부적으로 프레임워크 업그레이드가 늦어지는 경우가 많다. 대표적으로 Ray의 Jobs Submission API에 존재하는 인증 부재 취약점(CVE-2023-48022, "ShadowRay")은 벤더가 공식 패치를 제공하지 않은 채 오랜 기간 방치되었고, 실제로 수천 대의 클러스터가 침해되어 암호화폐 채굴 등에 악용되었다. 본 논문은 eBPF를 활용하여 애플리케이션 코드를 수정하거나 재배포하지 않고도, 이러한 취약점이 실제로 악용될 때 나타나는 비정상 행위를 커널 수준에서 탐지·차단하는 가상 패치(virtual patching) 메커니즘 kShield-VirtualPatch를 제안한다. 감시 대상 AI 워커 프로세스의 계보(lineage)를 추적하여, 의심스러운 자식 프로세스 실행(SHADOW_EXEC)뿐 아니라 바이너리 종류와 무관하게 신뢰되지 않은 목적지로의 아웃바운드 연결 시도(SHADOW_CONNECT)를 "행위의 본질적 불변량" 기준으로 탐지한다 — 이는 "어떤 도구를 실행했는가"가 아니라 "무엇을 하려 했는가"를 감시하므로, bash 내장 기능처럼 별도 바이너리를 실행하지 않는 우회에도 대응한다. 아울러 비동기 `bpf_send_signal` SIGKILL의 잔여 한계를 보완하기 위해, LSM 훅(`security_bprm_check_security`/`security_socket_connect`)으로 시스템 콜 자체를 동기적으로 실패시키는 사전 차단 컴포넌트도 함께 구현하였다.
 
-mock Ray Jobs API 환경에서 다단계 공격 체인(python3→sh→curl)과 bash `/dev/tcp/` 우회 시도를 각각 실행·연결 시점에 정확히 차단하면서 정상 job은 오탐 없이 통과함을 VM 실측으로 확인하였다. 비활성/SHADOW_EXEC+CONNECT/LSM 사전 차단 3개 그룹을 10회씩 반복 측정한 결과, fork 단계가 얕은 워크로드와 계보 무관 프로세스의 connect() 성능 모두에서 통계적으로 유의미한 차이는 없었다(Welch's t-test). 다만 job당 fork를 50배 늘린 워크로드에서는 처음으로 유의미하지만 작은 차이(처리량 −0.67%, 지연시간 +0.7%)가 나타나, 오버헤드가 워크로드의 fork 빈도에 비례함을 확인하였다. 같은 판정을 Falco 룰·Tetragon 정책으로 옮겨 같은 VM·워크로드에서 비교한 결과(4.5절), kShield-VirtualPatch만 사전에 고정한 ±2% 마진 안에서 동등성이 입증되었고 Falco·Tetragon은 두 워크로드 모두에서 마진을 벗어나는 유의한 오버헤드를 보였다 — 특히 Tetragon은 fork 집약적 워크로드에서 처리량 −7.6%까지 벌어졌다. 개발 및 제출 전 검토 과정에서 실행 파일 블록리스트의 경로-별칭 누락, 이중 용도 도구(curl/wget)의 오탐 전제, 감시 대상 프로세스 자신의 직접 행위 탐지 공백, 데몬 재시작 시 계보 유실 등 설계 자체의 구조적 공백을 추가로 발견하여 재설계·검증하였으며(3.3, 3.6~3.8절), 하드코딩된 rodata 룰·SIEM 미연동·오탐 시 세밀한 예외 부재라는 실무 도입 장벽에 대응해 신뢰 목적지 IP·감시 예외 UID를 재컴파일 없이 런타임에 관리하는 BPF map 기반 제어 계층과 syslog 연동을 추가하고(3.9절), 남은 rodata 룰(감시 대상 프로세스명·의심 바이너리 목록)까지 동일한 방식으로 런타임화하며 UID보다 세밀한 cgroup 단위 예외를 더하였다(3.10절) — 이 반복 과정 자체가 행위 기반 탐지 메커니즘을 설계할 때 반드시 고려해야 할 원칙들을 보여준다(5장).
+mock Ray Jobs API 환경에서 다단계 공격 체인(python3→sh→curl)과 bash `/dev/tcp/` 우회 시도를 각각 실행·연결 시점에 정확히 차단하면서 정상 job은 오탐 없이 통과함을 VM 실측으로 확인하였다. 비활성/SHADOW_EXEC+CONNECT/LSM 사전 차단 3개 그룹을 10회씩 반복 측정한 결과, fork 단계가 얕은 워크로드와 계보 무관 프로세스의 connect() 성능 모두에서 통계적으로 유의미한 차이는 없었다(Welch's t-test). 다만 job당 fork를 50배 늘린 워크로드에서는 처음으로 유의미하지만 작은 차이(처리량 −0.67%, 지연시간 +0.7%)가 나타나, 오버헤드가 워크로드의 fork 빈도에 비례함을 확인하였다. 같은 판정을 Falco 룰·Tetragon 정책으로 옮겨 같은 VM·워크로드에서 비교한 결과(4.5절), kShield-VirtualPatch만 사전에 고정한 ±2% 마진 안에서 동등성이 입증되었고 Falco·Tetragon은 두 워크로드 모두에서 마진을 벗어나는 유의한 오버헤드를 보였다 — 특히 Tetragon은 fork 집약적 워크로드에서 처리량 −7.6%까지 벌어졌다. 개발 및 제출 전 검토 과정에서 실행 파일 블록리스트의 경로-별칭 누락, 이중 용도 도구(curl/wget)의 오탐 전제, 감시 대상 프로세스 자신의 직접 행위 탐지 공백을 발견하여 기본 구조 자체를 재설계·검증하였으며(3.3절), 이어서 데몬 재시작 시 계보 유실 문제를 추가로 발견해 해소하였다(3.6절) — 이 반복 과정 자체가 행위 기반 탐지 메커니즘을 설계할 때 반드시 고려해야 할 원칙들을 보여준다(5장). 하드코딩된 rodata 룰·SIEM 미연동·오탐 시 세밀한 예외 부재라는 실무 도입 장벽에 대응해 신뢰 목적지 IP·감시 예외 UID를 재컴파일 없이 런타임에 관리하는 BPF map 기반 제어 계층과 syslog 연동을 추가하고(3.7절), 남은 rodata 룰(감시 대상 프로세스명·의심 바이너리 목록)까지 동일한 방식으로 런타임화하며 UID보다 세밀한 cgroup 단위 예외를 더하였다(3.8절).
 
 **핵심어:** eBPF, 가상 패치, virtual patching, AI 서빙 프레임워크 보안, Ray, ShadowRay, CVE-2023-48022
 
@@ -103,26 +94,19 @@ Falco [5], Tetragon [6] 등 eBPF 기반 런타임 보안 도구는 커스텀 룰
 
 ## 3. 설계 및 구현
 
-본 절 전체(3.3, 3.5~3.14절)에 걸쳐 설계가 v1부터 v14까지 총 열세 차례 반복되었다. 각 반복은 예외 없이 VM 실측이나 제출 전 자체 검토 과정에서 발견된 구체적 문제에 대한 대응이었으며, [표 1]은 이를 한눈에 볼 수 있도록 요약한 것이다 — 각 행의 상세 서술은 마지막 열의 절을 참고한다.
+기본 탐지 구조(계보 추적, SHADOW_EXEC/SHADOW_CONNECT, LSM 사전 차단, 오탐 방지, 자기 자신 직접 행위 탐지)를 확립하는 과정은 3.3~3.5절에서 서술한다. 이 기본 구조가 자리잡은 뒤로도 설계는 총 8차례 더 개선되었다(3.6~3.12절). 각 개선은 예외 없이 VM 실측이나 제출 전 자체 검토 과정에서 발견된 구체적 문제에 대한 대응이었으며, [표 1]은 이를 한눈에 볼 수 있도록 요약한 것이다 — 각 행의 상세 서술은 마지막 열의 절을 참고한다.
 
-**[표 1] 설계 반복(v1~v14) 요약**
+**[표 1] 설계 개선(1차~8차) 요약**
 
-| 버전 | 발견한 문제 | 수정 내용 | 검증 방법 | 절 |
+| 순번 | 발견한 문제 | 수정 내용 | 검증 방법 | 절 |
 |------|------------|----------|----------|-----|
-| v1 | 직속 부모만 확인 → 다단계 공격 체인을 놓치고 정상 job도 오탐 | 프로세스 계보(lineage) 추적 도입 | VM 실측 | 3.3 |
-| v2 | 실행 파일 이름 블록리스트(`suspicious_bins[]`)가 bash 내장 기능(`/dev/tcp/`) 등 우회에 취약 | 연결 시도 자체를 감시하는 SHADOW_CONNECT 추가 | VM 실측 | 3.3 |
-| v3 | 블록리스트가 `/usr/bin/curl`은 막고 `/bin/curl`은 놓침(경로 별칭 누락); 비동기 SIGKILL의 사후 차단 한계 | 별칭 경로 전부 등록 + LSM 훅 기반 동기적 사전 차단(`-EPERM`) 컴포넌트 추가 | VM 실측(빌드·attach·기능·성능) | 3.3, 3.5 |
-| v4 | curl/wget을 목적지와 무관하게 즉시 차단 → 정당한 모델·데이터셋 다운로드까지 오탐 | curl/wget을 exec 블록리스트에서 제외, 판단을 SHADOW_CONNECT/LSM `socket_connect`로 이전 | 신뢰/비신뢰 목적지 양쪽 VM 실측 | 3.6 |
-| v5 | 신규 룰을 처음부터 즉시 차단으로만 배포(단계적 롤아웃 불가) | 재컴파일 없이 전환 가능한 `enforce_mode`(audit-only/enforce) 런타임 토글 추가 | v3·LSM 양쪽, enforce/audit-only 4가지 조합 VM 실측 | 3.6 |
-| v6 | 계보 판정이 "자손"만 커버 → 감시 대상 프로세스 자신의 fork 없는 직접 행위는 어느 훅도 못 잡음 | 자기 자신의 comm을 확인하는 `watched_self[]` 추가 | 이름 바꾼 프로세스 직접 실행 + 무관 프로세스 회귀 확인, VM 실측 | 3.7 |
-| v7 | 계보 맵이 fork 훅에만 의존 → 데몬이 클러스터보다 나중에 뜨거나 재시작되면 이미 떠 있던 자손 프로세스가 계보에서 누락 | 유저스페이스 로더가 기동 시 `/proc`을 스캔해 계보를 백필 | 직속 부모 검사로 못 잡는 손자뻘(2단계) 체인으로 v3·LSM 양쪽 VM 실측 | 3.8 |
-| v8 | `trusted_dst_ipv4[]`가 rodata라 신뢰 목적지(클라우드 스토리지 IP 등) 하나 추가할 때마다 재컴파일·재배포 필요 | `trusted_dst_ipv4_map`(BPF map)으로 전환, 핀된 맵을 `kshield_ctl trust-add/del/list`가 런타임에 관리 | 6회 curl 시도 중 신뢰 등록 구간만 통과함을 v3에서 VM 실측 | 3.9 |
-| v9 | (a) perf buffer/표준출력만 있어 기존 SIEM 파이프라인과 단절 (b) audit-only만으로는 특정 사용자 단위 예외 불가 → GPU 오탐 비용 부담 | (a) `--syslog`로 JSON 이벤트를 `syslog(LOG_AUTHPRIV)`에도 기록 (b) `exempt_uids_map` + `kshield_ctl exempt-add/del/list`로 UID 단위 감시 예외 | 동일한 6회 curl 시도 중 UID 예외 구간만 통과, `journalctl`에 JSON 4건 정확히 대응됨을 VM 실측 | 3.9 |
-| v10 | `watched_parents[]`/`watched_self[]`/`suspicious_bins[]`가 여전히 rodata; UID 단위 예외만으로는 "네임스페이스" 지적의 절반만 해소 | 세 배열을 BPF map으로 전환(맵이 새로 생성될 때만 기본값 시드), `exempt_cgroups_map`으로 cgroup(≈컨테이너/파드) 단위 예외 추가, `kshield_ctl`을 6개 리소스 체계로 재구성 | `parent-add/del`·`bin-add/del`·`self-add/del` 세 쌍 모두 재시작 없이 즉시 반영됨을 VM 실측(`cgroup-exempt-*`는 코드 구현만, VM 미검증) | 3.10 |
-| v11 | 데몬을 `kill -9`로 강제 종료하면 BPF map은 핀돼 있어도 프로그램의 부착(link) 자체는 핀돼 있지 않아 커널이 즉시 회수 → 그 순간부터 완전 무방비(fail-open). Tetragon과의 대조 실험에서 발견 | 다섯 개 프로그램의 link를 전부 `bpffs`에 핀. 재시작 시 새 attach를 먼저 만든 뒤 옛 핀을 지워 보호 공백 없이 교체. SIGINT/SIGTERM(의도된 종료)에서만 명시적으로 unpin, `kill -9`는 그 경로를 타지 않아 핀이 남아 계속 보호 | `kill -9` 후 `bpftool prog list`로 5개 프로그램 전부 잔존 확인, 그 상태에서 공격이 여전히 차단됨을 VM 실측. SIGTERM으로는 핀이 실제로 사라짐(의도한 대로 꺼짐)도 함께 확인 | 3.11 |
-| v12 | `watched_self[]`가 fork 없는 self-exec 치환(`bash -c '<단일 명령>'`이 자기 자신을 execve()로 다른 바이너리로 치환)을 놓침 — post-exec 훅 발동 시점엔 이미 `comm`이 바뀌어 있고 fork도 없어 계보 등록 안 됨. v11 핸드오프 재측정 중 발견 | execve() 진입 시점(comm 변경 전)에 새 훅(`tp/syscalls/sys_enter_execve`)을 추가해, `watched_self[]` 매칭 시 미리 `ai_worker_lineage`에 등록 | 파이프 없는 단일 명령 self-exec 재현(수정 전 2.008초 무탐지 → 수정 후 0.006초 즉시 차단)과 정상 job·기존 fork 케이스 회귀 없음을 VM 실측 | 3.12 |
-| v13 | 실제 Ray 클러스터 검증 중, Ray의 gRPC 클라이언트가 신뢰 등록된 목적지(GCS 자신의 IP)로도 IPv4-mapped IPv6 주소(`::ffff:a.b.c.d`)로 접속을 시도해 `trace_shadow_connect_v6`(IPv6 전용 신뢰 목록 없음, loopback만 예외)에서 무조건 차단됨을 발견 — IPv4 신뢰 등록이 무력화됨 | `::ffff:0:0/96` 대역을 판별해 뒤 4바이트의 실제 IPv4 주소를 기존 `trusted_dst_ipv4_map`으로 재판정하도록 `trace_shadow_connect_v6` 보강 | 실제 Ray 2.52.0 클러스터(Python 3.11) 기동 후, 실제 Jobs API로 정상 job 5회 전부 SUCCEEDED, 악성 job(`nc`)은 SHADOW_EXEC으로 정확히 탐지·차단(exit 137)됨을 VM 실측 | 3.13 |
-| v14 | 같은 실제 Ray 클러스터에 LSM 컴포넌트(`kshield_vpatch_lsm`)를 처음 붙여 검증하자, 별도 BPF 오브젝트인 `kshield_lsm_socket_connect`의 AF_INET6 분기에도 v13과 동일한 IPv4-mapped IPv6 신뢰 우회가 독립적으로 존재함을 발견 — 신규 워커의 GCS 연결이 매번 `-EPERM`으로 막혀 제출한 job 6개 전부 PENDING에 정체됨 | `trace_shadow_connect_v6`(v13)와 동일한 판정 로직을 `kshield_lsm_socket_connect`에 이식 | 같은 실제 클러스터·실제 Jobs API로 정상 job 5회 전부 SUCCEEDED, 악성 job(`nc`)은 execve() 사전 차단(exit code 126, "Operation not permitted")으로 확인 | 3.14 |
+| 1차 | 계보 맵이 fork 훅에만 의존 → 데몬이 클러스터보다 나중에 뜨거나 재시작되면 이미 떠 있던 자손 프로세스가 계보에서 누락 | 유저스페이스 로더가 기동 시 `/proc`을 스캔해 계보를 백필 | 직속 부모 검사로 못 잡는 손자뻘(2단계) 체인으로 v3·LSM 양쪽 VM 실측 | 3.6 |
+| 2차/3차 | (a) `trusted_dst_ipv4[]`가 rodata라 신뢰 목적지(클라우드 스토리지 IP 등) 하나 추가할 때마다 재컴파일·재배포 필요 (b) perf buffer/표준출력만 있어 기존 SIEM 파이프라인과 단절 (c) audit-only만으로는 특정 사용자 단위 예외 불가 → GPU 오탐 비용 부담 | (a) `trusted_dst_ipv4_map`(BPF map)으로 전환, 핀된 맵을 `kshield_ctl trust-add/del/list`가 런타임에 관리 (b) `--syslog`로 JSON 이벤트를 `syslog(LOG_AUTHPRIV)`에도 기록 (c) `exempt_uids_map` + `kshield_ctl exempt-add/del/list`로 UID 단위 감시 예외 | 6회 curl 시도 중 신뢰 등록·UID 예외 구간만 통과, `journalctl`에 JSON 4건 정확히 대응됨을 VM 실측 | 3.7 |
+| 4차 | `watched_parents[]`/`watched_self[]`/`suspicious_bins[]`가 여전히 rodata; UID 단위 예외만으로는 "네임스페이스" 지적의 절반만 해소 | 세 배열을 BPF map으로 전환(맵이 새로 생성될 때만 기본값 시드), `exempt_cgroups_map`으로 cgroup(≈컨테이너/파드) 단위 예외 추가, `kshield_ctl`을 6개 리소스 체계로 재구성 | `parent-add/del`·`bin-add/del`·`self-add/del` 세 쌍 모두 재시작 없이 즉시 반영됨을 VM 실측(`cgroup-exempt-*`는 코드 구현만, VM 미검증) | 3.8 |
+| 5차 | 데몬을 `kill -9`로 강제 종료하면 BPF map은 핀돼 있어도 프로그램의 부착(link) 자체는 핀돼 있지 않아 커널이 즉시 회수 → 그 순간부터 완전 무방비(fail-open). Tetragon과의 대조 실험에서 발견 | 다섯 개 프로그램의 link를 전부 `bpffs`에 핀. 재시작 시 새 attach를 먼저 만든 뒤 옛 핀을 지워 보호 공백 없이 교체. SIGINT/SIGTERM(의도된 종료)에서만 명시적으로 unpin, `kill -9`는 그 경로를 타지 않아 핀이 남아 계속 보호 | `kill -9` 후 `bpftool prog list`로 5개 프로그램 전부 잔존 확인, 그 상태에서 공격이 여전히 차단됨을 VM 실측. SIGTERM으로는 핀이 실제로 사라짐(의도한 대로 꺼짐)도 함께 확인 | 3.9 |
+| 6차 | `watched_self[]`가 fork 없는 self-exec 치환(`bash -c '<단일 명령>'`이 자기 자신을 execve()로 다른 바이너리로 치환)을 놓침 — post-exec 훅 발동 시점엔 이미 `comm`이 바뀌어 있고 fork도 없어 계보 등록 안 됨. 5차 핸드오프 재측정 중 발견 | execve() 진입 시점(comm 변경 전)에 새 훅(`tp/syscalls/sys_enter_execve`)을 추가해, `watched_self[]` 매칭 시 미리 `ai_worker_lineage`에 등록 | 파이프 없는 단일 명령 self-exec 재현(수정 전 2.008초 무탐지 → 수정 후 0.006초 즉시 차단)과 정상 job·기존 fork 케이스 회귀 없음을 VM 실측 | 3.10 |
+| 7차 | 실제 Ray 클러스터 검증 중, Ray의 gRPC 클라이언트가 신뢰 등록된 목적지(GCS 자신의 IP)로도 IPv4-mapped IPv6 주소(`::ffff:a.b.c.d`)로 접속을 시도해 `trace_shadow_connect_v6`(IPv6 전용 신뢰 목록 없음, loopback만 예외)에서 무조건 차단됨을 발견 — IPv4 신뢰 등록이 무력화됨 | `::ffff:0:0/96` 대역을 판별해 뒤 4바이트의 실제 IPv4 주소를 기존 `trusted_dst_ipv4_map`으로 재판정하도록 `trace_shadow_connect_v6` 보강 | 실제 Ray 2.52.0 클러스터(Python 3.11) 기동 후, 실제 Jobs API로 정상 job 5회 전부 SUCCEEDED, 악성 job(`nc`)은 SHADOW_EXEC으로 정확히 탐지·차단(exit 137)됨을 VM 실측 | 3.11 |
+| 8차 | 같은 실제 Ray 클러스터에 LSM 컴포넌트(`kshield_vpatch_lsm`)를 처음 붙여 검증하자, 별도 BPF 오브젝트인 `kshield_lsm_socket_connect`의 AF_INET6 분기에도 7차와 동일한 IPv4-mapped IPv6 신뢰 우회가 독립적으로 존재함을 발견 — 신규 워커의 GCS 연결이 매번 `-EPERM`으로 막혀 제출한 job 6개 전부 PENDING에 정체됨 | `trace_shadow_connect_v6`(7차)와 동일한 판정 로직을 `kshield_lsm_socket_connect`에 이식 | 같은 실제 클러스터·실제 Jobs API로 정상 job 5회 전부 SUCCEEDED, 악성 job(`nc`)은 execve() 사전 차단(exit code 126, "Operation not permitted")으로 확인 | 3.12 |
 
 ### 3.1 위협 모델
 
@@ -180,7 +164,7 @@ kShield-VirtualPatch는 저자의 선행 연구 kShield [8]와 동일한 아키�
 
 ### 3.3 핵심 탐지 메커니즘 (SHADOW_EXEC, SHADOW_CONNECT)
 
-아래 [그림 1]은 ShadowRay 공격 체인과 그 위에 놓인 탐지 지점을 현재(v7 기준) 설계로 요약한 것이다. 세부 판정 로직(v1~v3의 재설계 과정)은 이어지는 본문에서 다룬다.
+아래 [그림 1]은 ShadowRay 공격 체인과 그 위에 놓인 탐지 지점을 현재(1차 개선 반영) 설계로 요약한 것이다. 세부 판정 로직의 재설계 과정은 이어지는 본문에서 다룬다.
 
 **[그림 1] 공격 체인과 탐지 지점**
 
@@ -192,7 +176,7 @@ flowchart TD
 
     D -->|"execve()"| BIN{"실행 파일?"}
     BIN -->|"nc, ncat"| EXECHOOK["SHADOW_EXEC /<br/>bprm_check_security"]
-    BIN -->|"curl, wget<br/>(v4: dual-use, 통과)"| CONN["connect() 시도"]
+    BIN -->|"curl, wget<br/>(dual-use, 통과)"| CONN["connect() 시도"]
 
     EXECHOOK -->|"의심 바이너리"| BLOCK1["차단<br/>kprobe: 비동기 SIGKILL<br/>LSM: 동기 -EPERM"]
 
@@ -202,21 +186,21 @@ flowchart TD
     CONNHOOK --> BLOCK2["차단<br/>kprobe: 비동기 SIGKILL<br/>LSM: 동기 -EPERM"]
 
     LIN[("ai_worker_lineage<br/>BPF map")]
-    W -.->|"fork 시 등록<br/>(+ v7: /proc 백필)"| LIN
+    W -.->|"fork 시 등록<br/>(+ 1차: /proc 백필)"| LIN
     LIN -.->|"계보 조회"| EXECHOOK
     LIN -.->|"계보 조회"| CONNHOOK
 ```
 
-감시 대상 프로세스 자신이 fork 없이 직접 실행/연결하는 경우(v6, `watched_self[]`)는 위 그림의 "AI 워커 프로세스" 노드에서 fork 단계를 거치지 않고 바로 오른쪽 경로(`execve()`/`connect()`)로 진입하는 것으로 이해하면 된다 — 별도 노드로 그리지 않은 이유는 판정 로직상 두 경로가 이후 완전히 동일하기 때문이다.
+감시 대상 프로세스 자신이 fork 없이 직접 실행/연결하는 경우(`watched_self[]`)는 위 그림의 "AI 워커 프로세스" 노드에서 fork 단계를 거치지 않고 바로 오른쪽 경로(`execve()`/`connect()`)로 진입하는 것으로 이해하면 된다 — 별도 노드로 그리지 않은 이유는 판정 로직상 두 경로가 이후 완전히 동일하기 때문이다.
 
-초기 설계(v1)는 `sched_process_exec` 트레이스포인트에서 새로 실행된 프로세스의 **직속 부모**만 확인하여, 부모 comm이 `watched_parents[]`(감시 대상 AI 워커 프로세스 목록, 예: `raylet`)와 일치하고 실행 파일이 `suspicious_bins[]`와 일치하면 즉시 SIGKILL을 전송하는 방식이었다.
+초기 설계는 `sched_process_exec` 트레이스포인트에서 새로 실행된 프로세스의 **직속 부모**만 확인하여, 부모 comm이 `watched_parents[]`(감시 대상 AI 워커 프로세스 목록, 예: `raylet`)와 일치하고 실행 파일이 `suspicious_bins[]`와 일치하면 즉시 SIGKILL을 전송하는 방식이었다.
 
 그러나 VM 실측 과정에서 두 가지 문제가 발견되었다.
 
 1. **정상 job도 오탐**: mock Ray Jobs API는 정상/악성 job을 구분하지 않고 항상 `/bin/sh -c <entrypoint>` 형태로 실행한다. 이는 실제 Ray의 job 실행 방식과도 동일하다. 따라서 `suspicious_bins[]`에 `/bin/sh`가 포함되어 있으면 정상 job(`echo`, `python3 -c ...`)조차 실행 즉시 차단되는 문제가 실측으로 확인되었다.
-2. **다단계 실행 체인 탐지 실패**: 실제 공격은 `python3(워커) → sh → curl`처럼 최소 2단계를 거친다. curl의 직속 부모는 `sh`이지 워커 프로세스가 아니므로, "직속 부모만 확인"하는 v1 로직으로는 curl 실행을 탐지할 수 없었다.
+2. **다단계 실행 체인 탐지 실패**: 실제 공격은 `python3(워커) → sh → curl`처럼 최소 2단계를 거친다. curl의 직속 부모는 `sh`이지 워커 프로세스가 아니므로, "직속 부모만 확인"하는 로직으로는 curl 실행을 탐지할 수 없었다.
 
-이를 해결하기 위해 v2는 `sched_process_fork` 트레이스포인트를 추가로 후킹하여 **AI 워커의 자손 프로세스 계보(lineage)**를 BPF 해시맵(`ai_worker_lineage`, pid → flag)으로 추적한다. 프로세스가 fork될 때, 부모가 이미 계보에 속하거나 `watched_parents[]`와 일치하면 자식도 계보에 편입시킨다. 이렇게 하면 몇 단계를 거치든 계보 추적이 끊기지 않는다. 아울러 `/bin/sh`, `/bin/bash`는 정상 job 실행에도 쓰이는 경로이므로 `suspicious_bins[]`에서 제외하고, `curl`, `wget`, `nc` 등 실제 페이로드 다운로드·외부 연결에 쓰이는 바이너리만 남겼다.
+이를 해결하기 위해 `sched_process_fork` 트레이스포인트를 추가로 후킹하여 **AI 워커의 자손 프로세스 계보(lineage)**를 BPF 해시맵(`ai_worker_lineage`, pid → flag)으로 추적한다. 프로세스가 fork될 때, 부모가 이미 계보에 속하거나 `watched_parents[]`와 일치하면 자식도 계보에 편입시킨다. 이렇게 하면 몇 단계를 거치든 계보 추적이 끊기지 않는다. 아울러 `/bin/sh`, `/bin/bash`는 정상 job 실행에도 쓰이는 경로이므로 `suspicious_bins[]`에서 제외하고, `curl`, `wget`, `nc` 등 실제 페이로드 다운로드·외부 연결에 쓰이는 바이너리만 남겼다.
 
 최종 탐지 로직(`src/kshield_vpatch.bpf.c` 참조)은 다음과 같다.
 
@@ -229,21 +213,67 @@ flowchart TD
 
 `watched_parents[]`와 `suspicious_bins[]`는 BPF rodata 섹션에 컴파일 타임에 삽입되며, 이는 kShield [8]와 동일하게 대상 경로 변경 시 재컴파일이 필요하다는 한계를 가진다(향후 연구 참고). 전체 구현 코드는 공개 저장소 [9]에서 확인할 수 있다.
 
-**v3 재설계: SHADOW_CONNECT — 실행 파일 블록리스트의 근본적 우회 문제 해결**
+**SHADOW_CONNECT — 실행 파일 블록리스트의 근본적 우회 문제 해결**
 
-v2의 SHADOW_EXEC는 `suspicious_bins[]`라는 실행 파일 이름 블록리스트에 의존하는데, 이는 다음과 같이 쉽게 우회 가능하다는 한계가 있었다.
+SHADOW_EXEC는 `suspicious_bins[]`라는 실행 파일 이름 블록리스트에 의존하는데, 이는 다음과 같이 쉽게 우회 가능하다는 한계가 있었다.
 
-1. **bash 내장 기능 우회**: `bash -c 'exec 3<>/dev/tcp/host/port; ...'` 같은 방식은 bash 자체의 내장 TCP 리다이렉션 기능을 사용하므로, curl/nc 같은 별도 바이너리를 `exec()`하지 않는다. `suspicious_bins[]`에 없는 방식이라 v2로는 탐지 불가능했다.
+1. **bash 내장 기능 우회**: `bash -c 'exec 3<>/dev/tcp/host/port; ...'` 같은 방식은 bash 자체의 내장 TCP 리다이렉션 기능을 사용하므로, curl/nc 같은 별도 바이너리를 `exec()`하지 않는다. `suspicious_bins[]`에 없는 방식이라 탐지 불가능했다.
 2. **watched_parents의 python3가 suspicious_bins에는 없음**: python3는 감시 대상 부모 목록에는 있지만, python3 자신이 소켓 API로 직접 통신하면 실행 파일 이름 기반 검사를 통과한다.
 3. **별도 프로세스 실행 없이 직접 통신**: 공격자가 원래 프로세스 안에서 소켓만 열면, 애초에 감시할 `exec()` 이벤트 자체가 없다.
 
-이 세 우회의 공통점은 결국 커널의 `tcp_v4_connect`/`tcp_v6_connect`를 거쳐 아웃바운드 TCP 연결을 시도한다는 점이다. v3는 이 지점을 직접 후킹하여, "어떤 바이너리를 실행했는가"가 아니라 **"AI 워커 계보에서 신뢰되지 않은 목적지로 연결을 시도했는가"** 를 감시한다. AI 워커 계보에 속한 프로세스가 loopback(127.0.0.0/8) 또는 `trusted_dst_ipv4_map`(운영자가 런타임에 신뢰 목적지로 등록한 IP 목록, 3.9절)에 없는 주소로 연결을 시도하면, 바이너리 종류와 무관하게 즉시 SIGKILL을 전송한다. 기존 SHADOW_EXEC은 그대로 유지하여 두 계층이 함께 방어한다(defense-in-depth) — 알려진 바이너리는 실행 시점에 더 일찍 잡고, 그 외 모든 경로는 연결 시도 시점에 잡는다.
+이 세 우회의 공통점은 결국 커널의 `tcp_v4_connect`/`tcp_v6_connect`를 거쳐 아웃바운드 TCP 연결을 시도한다는 점이다. 이 지점을 직접 후킹하여, "어떤 바이너리를 실행했는가"가 아니라 **"AI 워커 계보에서 신뢰되지 않은 목적지로 연결을 시도했는가"** 를 감시한다. AI 워커 계보에 속한 프로세스가 loopback(127.0.0.0/8) 또는 `trusted_dst_ipv4_map`(운영자가 런타임에 신뢰 목적지로 등록한 IP 목록, 3.7절)에 없는 주소로 연결을 시도하면, 바이너리 종류와 무관하게 즉시 SIGKILL을 전송한다. 기존 SHADOW_EXEC은 그대로 유지하여 두 계층이 함께 방어한다(defense-in-depth) — 알려진 바이너리는 실행 시점에 더 일찍 잡고, 그 외 모든 경로는 연결 시도 시점에 잡는다.
 
-**명시적으로 짚어둘 점**: 위 우회 (2)는 흔히 "living-off-the-land"(공격자가 별도 도구를 반입하지 않고 대상 시스템에 이미 있는 정상 기능만으로 공격하는 기법)라고 불리는 유형에 해당한다 — 파이썬 인터프리터 자체의 내장 `urllib`/`socket` 모듈로 직접 통신하는 경우도 정확히 이 범주다. SHADOW_CONNECT는 "어떤 프로그램이 연결을 시도했는가"가 아니라 "커널의 `tcp_v4_connect`/`tcp_v6_connect`를 거쳐 어디로 연결을 시도했는가"만 보므로, curl이든 파이썬의 `socket` 모듈이든 판단 결과는 동일하다 — 즉 이 유형의 우회는 이미 v3 설계 자체로 커버된다. 반면 새 연결을 맺지 않고 **이미 신뢰받아 열려 있는 기존 연결 위에 데이터를 얹어 유출**하는 경우는 이 메커니즘이 애초에 감시하는 지점(connect() 호출)이 발생하지 않으므로 잡지 못한다 — 이는 도구·언어와 무관한 일반적 한계이며, 아래 "v3의 한계"에 이미 명시되어 있다.
+**명시적으로 짚어둘 점**: 위 우회 (2)는 흔히 "living-off-the-land"(공격자가 별도 도구를 반입하지 않고 대상 시스템에 이미 있는 정상 기능만으로 공격하는 기법)라고 불리는 유형에 해당한다 — 파이썬 인터프리터 자체의 내장 `urllib`/`socket` 모듈로 직접 통신하는 경우도 정확히 이 범주다. SHADOW_CONNECT는 "어떤 프로그램이 연결을 시도했는가"가 아니라 "커널의 `tcp_v4_connect`/`tcp_v6_connect`를 거쳐 어디로 연결을 시도했는가"만 보므로, curl이든 파이썬의 `socket` 모듈이든 판단 결과는 동일하다 — 즉 이 유형의 우회는 이미 이 설계 자체로 커버된다. 반면 새 연결을 맺지 않고 **이미 신뢰받아 열려 있는 기존 연결 위에 데이터를 얹어 유출**하는 경우는 이 메커니즘이 애초에 감시하는 지점(connect() 호출)이 발생하지 않으므로 잡지 못한다 — 이는 도구·언어와 무관한 일반적 한계이며, 아래 "SHADOW_CONNECT의 한계"에 이미 명시되어 있다.
 
-아울러 v2에는 프로세스 종료 시 `ai_worker_lineage` 맵을 정리하는 로직이 없어, PID가 재사용될 경우 무관한 새 프로세스가 죽은 프로세스의 계보 정보를 잘못 물려받을 수 있는 버그가 있었다. v3는 `sched_process_exit` 훅으로 프로세스 종료 시 계보 정보를 제거하여 이를 해결하였다.
+아울러 초기에는 프로세스 종료 시 `ai_worker_lineage` 맵을 정리하는 로직이 없어, PID가 재사용될 경우 무관한 새 프로세스가 죽은 프로세스의 계보 정보를 잘못 물려받을 수 있는 버그가 있었다. `sched_process_exit` 훅을 추가해 프로세스 종료 시 계보 정보를 제거하여 이를 해결하였다.
 
-**v3의 한계**: SHADOW_CONNECT도 완전한 차단은 아니다. (1) 이미 열려 있는 정상 연결에 얹혀 데이터를 빼가는 경우, (2) 허용된 포트/프로토콜(예: DNS) 위로 데이터를 숨기는 터널링, (3) 네트워크가 아예 필요 없는 로컬 전용 공격은 이 메커니즘으로 포착되지 않는다. 또한 `bpf_send_signal`은 비동기적이므로 `connect()` 진입 시점에 신호를 보내도 완전한 사전 차단을 수학적으로 보장하지는 않는다 — 이 한계를 해소하기 위해 `security_socket_connect`/`security_bprm_check_security` LSM 훅 기반의 동기적 사전 차단을 별도 컴포넌트로 구현하였다(3.5절). 다만 `CONFIG_BPF_LSM` 및 활성 LSM 스택에 "bpf" 포함이 필요해 배포 환경 의존성이 있으므로, 본 절의 SHADOW_EXEC/SHADOW_CONNECT는 그러한 의존성 없이 어디서나 동작하는 기본 방어선으로 계속 유지한다.
+**SHADOW_CONNECT의 한계**: SHADOW_CONNECT도 완전한 차단은 아니다. (1) 이미 열려 있는 정상 연결에 얹혀 데이터를 빼가는 경우, (2) 허용된 포트/프로토콜(예: DNS) 위로 데이터를 숨기는 터널링, (3) 네트워크가 아예 필요 없는 로컬 전용 공격은 이 메커니즘으로 포착되지 않는다. 또한 `bpf_send_signal`은 비동기적이므로 `connect()` 진입 시점에 신호를 보내도 완전한 사전 차단을 수학적으로 보장하지는 않는다 — 이 한계를 해소하기 위해 `security_socket_connect`/`security_bprm_check_security` LSM 훅 기반의 동기적 사전 차단을 별도 컴포넌트로 구현하였다(3.5절). 다만 `CONFIG_BPF_LSM` 및 활성 LSM 스택에 "bpf" 포함이 필요해 배포 환경 의존성이 있으므로, 본 절의 SHADOW_EXEC/SHADOW_CONNECT는 그러한 의존성 없이 어디서나 동작하는 기본 방어선으로 계속 유지한다.
+
+**오탐 방지: curl/wget의 이중 용도 문제**
+
+`suspicious_bins[]`는 curl/wget 실행 자체를 목적지와 무관하게 즉시 이상 행위로 간주하지 않는다. 실제 AI 서빙 워크로드에서는 워커가 모델 가중치·데이터셋을 HuggingFace/S3/사내 레지스트리 등에서 curl/wget으로 내려받는 것이 정상적인 운영이기 때문이다 — "curl을 실행했는가"는 이상 행위의 신호가 아니고, "curl이 어디로 연결하는가"가 실제 신호다. 이를 반영해 curl/wget은 `suspicious_bins[]`에서 제외하고 판단을 목적지를 아는 SHADOW_CONNECT(및 LSM `socket_connect`)에게 전적으로 넘긴다 — exec 시점에는 통과시키고, 실제 `connect()` 시도 시점에 목적지가 신뢰되지 않으면 그때 잡는다. 새 메커니즘 없이 기존 defense-in-depth 구조(exec 계층/connect 계층)를 재활용한 것이다. `nc`/`ncat`은 AI 워커 계보에서 합법적으로 실행될 이유가 사실상 없고(리버스/바인드 셸 목적이 대부분이며, 바인드 셸은 `connect()`를 직접 호출하지 않아 SHADOW_CONNECT만으로는 못 잡을 수 있다) 목적지와 무관하게 exec 즉시 차단을 유지한다.
+
+아울러 ModSecurity, Cloudflare WAF 등 가상 패치의 원조 도구들은 신규 룰을 배포할 때 보통 "탐지만 하고 차단은 안 함"(alert-only/dry-run) 단계를 거쳐 오탐을 관찰한 뒤에야 실제 차단으로 전환한다(2.2절). 이 단계적 배포를 지원하는 `enforce_mode` 전역 변수를 두었다. `watched_parents[]` 등과 달리 `const`가 아닌 일반 전역 변수(`.data` 섹션)로 선언하여, 재컴파일 없이 유저스페이스 로더 실행 시점(`--audit-only` 플래그)에 값을 설정할 수 있다 — enforce_mode=1(기본)이면 즉시 SIGKILL/-EPERM 하고, 0이면 이벤트만 기록하고 실제 차단은 건너뛴다.
+
+**VM 실측 결과**: 신뢰 목적지 다운로드 시나리오(`curl http://127.0.0.1:8000/model.bin`, 더미 파일 서버)와 신뢰 안 된 목적지 시나리오(`curl http://1.1.1.1/`)를 v3(kprobe/SIGKILL)와 `kshield_vpatch_lsm` 양쪽에서, enforce/audit-only 두 모드로 재현하였다.
+
+```
+[v3, enforce] 신뢰 목적지 다운로드 → 로그 없음, 파일 정상 수신(HTTP 200)
+[v3, enforce] curl http://1.1.1.1/ →
+  SHADOW_CONNECT 탐지! parent=sh -> proc=curl(pid=820008) dst=1.1.1.1:80 => SIGKILL 전송
+[v3, audit-only] curl http://1.1.1.1/ →
+  SHADOW_CONNECT 탐지! parent=sh -> proc=curl(pid=820018) dst=1.1.1.1:80 => [AUDIT-ONLY] 차단 안 함(로그만)
+
+[v3_lsm, enforce] curl http://1.1.1.1/ →
+  LSM_CONNECT_BLOCK 탐지! proc=curl(pid=820034) parent=sh dst=1.1.1.1:80 => connect() -EPERM
+[v3_lsm, audit-only] curl http://1.1.1.1/ →
+  LSM_CONNECT_BLOCK 탐지! proc=curl(pid=820040) parent=sh dst=1.1.1.1:80 => [AUDIT-ONLY] connect() 허용됨(로그만)
+```
+
+두 시나리오 모두에서 SHADOW_EXEC/LSM_EXEC_BLOCK은 더 이상 curl에 발동하지 않았고(의도한 대로), 신뢰 목적지 다운로드는 완전히 정상 처리(오탐 제거 확인)되었으며, 신뢰 안 된 목적지로의 시도는 exec 대신 connect 계층에서 여전히 정확히 차단됨을 확인하였다(탐지 능력 손실 없음). enforce/audit-only 전환도 재컴파일 없이 `--audit-only` 플래그만으로 즉시 반영됨을 확인하였다.
+
+이 시점의 남는 한계는, `watched_parents[]`, `trusted_dst_ipv4[]` 등 나머지 룰 배열이 여전히 rodata 컴파일 타임 상수라 재컴파일이 필요하다는 것이었다(→ 3.7절(2차/3차)에서 `trusted_dst_ipv4_map`에 한해 해소, 3.8절(4차)에서 나머지 배열도 해소).
+
+**감시 대상 프로세스 자신의 직접 행위 탐지**
+
+`current_is_watched()`의 판정 조건 — (a) 이미 `ai_worker_lineage` 맵에 있거나, (b) 직속 부모의 comm이 `watched_parents[]`와 일치 — 은 이 둘 다 "자손 프로세스"만 커버한다는 공백이 있었다. `trace_lineage_fork`는 포크가 발생할 때 "포크하는 쪽(부모)"의 comm이 `watched_parents[]`와 일치해야 그 **자식**을 계보에 등록하는데, 정작 감시 대상 프로세스 본인(예: `raylet`)은 어떤 fork 이벤트에서도 "등록되는 자식" 위치에 놓이지 않으므로 계보 맵에 절대 들어가지 않는다. 그 결과 `raylet` 자신이 **fork 없이 직접** `execve()`나 `connect()`를 호출하면, 계보에도 없고(자손이 아니므로) 직속 부모 검사도 통과하지 못해(raylet의 부모는 보통 systemd 등이지 raylet 자신이 아니므로) 어느 훅도 이를 감지하지 못한다. 지금까지의 모든 실험은 mock 서버가 entrypoint를 항상 `subprocess.run(["/bin/sh","-c",...])`로 실행했기 때문에, 이 경로는 한 번도 노출되지 않았었다.
+
+이를 메우기 위해 `watched_parents[]`와 별도로 `watched_self[]`(`raylet`, `ray::IDLE`만 포함)를 두고, `current_is_watched()`에 "내 자신의 comm이 `watched_self[]`와 일치하는가"를 세 번째 조건으로 추가하였다. `watched_parents[]`를 그대로 재사용하지 않은 이유는, 그 배열에는 본 PoC 편의를 위한 `"python3"`처럼 매우 범용적인 이름이 포함되어 있어 자기 자신 검사에 그대로 쓰면 이 프로그램과 무관한 다른 python3 프로세스(공유 서버의 다른 사용자 스크립트 등)까지 AI 워커로 오인될 위험이 있기 때문이다. `watched_self[]`는 실제 Ray 워커 프로세스명만 담아 이 위험을 배제한다.
+
+**VM 실측 결과**: `/bin/nc`를 파일명만 `raylet`로 복사한 뒤(`cp /bin/nc /tmp/raylet`) 일반 bash 셸에서 직접(`/tmp/raylet 1.1.1.1 80`, fork 없이, 부모는 그냥 bash) 실행하여 재현하였다.
+
+```
+[v3] /tmp/raylet 1.1.1.1 80 (watched_self[] 없이는 무탐지) →
+  SHADOW_CONNECT 탐지! parent=bash -> proc=raylet(pid=820134) dst=1.1.1.1:80 => SIGKILL 전송
+[v3_lsm] /tmp/raylet 1.1.1.1 80 →
+  LSM_CONNECT_BLOCK 탐지! proc=raylet(pid=820181) parent=bash dst=1.1.1.1:80 => connect() -EPERM
+
+[회귀 확인] 이름을 바꾸지 않은 평범한 nc(nc 1.1.1.1 80, v3/v3_lsm 양쪽) → 로그 없음, 정상 동작(무관한 프로세스는 여전히 영향 없음)
+```
+
+이름만 `raylet`인 프로세스가 fork 한 번 없이 자신의 직접 `connect()`로 잡혔고, 이름을 바꾸지 않은 평범한 `nc`는 v3·LSM 양쪽에서 여전히 아무 영향을 받지 않음을 확인하여 새 조건이 무관한 프로세스에 대한 오탐을 유발하지 않음을 검증하였다.
+
+이 검사는 `watched_self[]`에 등록된 이름과 정확히 일치하는 comm에만 적용된다. 공격자가 프로세스 이름을 감시 목록에 없는 임의의 이름으로 바꿔서 실행하거나(예: `execve()`의 `argv[0]`만 바꾸는 것이 아니라 실제 바이너리 경로 자체를 다른 이름으로 배치), 애초에 감시 대상 프로세스의 메모리 공간 안에서 코드 인젝션으로 동작하는 경우(예: 별도 프로세스/exec 없이 기존 워커의 실행 흐름 자체를 탈취)에 대해서는 여전히 다루지 않는다 — 이 한계는 향후 연구로 남긴다(5장).
 
 ### 3.4 공격 재현 환경
 
@@ -277,61 +307,15 @@ SHADOW_EXEC/SHADOW_CONNECT는 모두 "행위가 발생한 뒤 `bpf_send_signal(9
 
 > **검증 상태**: 빌드·attach(`lsm=...,bpf` 설정 후) 성공, `execve()`/`connect()` 사전 차단 동작(수정 후), 정상 job 오탐 없음을 VM에서 확인하였다. 성능 오버헤드도 4.4절에서 v3(SHADOW_EXEC+CONNECT) 대비 측정하여 유의미한 차이가 없음을 확인하였다(처리량 p=0.6228, 지연시간 p=0.9348). 다만 탐지 동작 확인은 여전히 단일 실행 기반 정성적 확인이며, N회 반복 탐지율, IPv6/DNS 터널링 등 SHADOW_CONNECT와 공유하는 잔여 한계(3.3절)에 대한 검증은 아직 수행하지 않았다(5장 향후 연구 참고).
 
-### 3.6 v4/v5 재검토: 오탐 전제 재검토와 단계적 배포
-
-**v4 — SHADOW_EXEC의 오탐 전제 재검토.** v2/v3까지 `suspicious_bins[]`는 curl/wget 실행 자체를 목적지와 무관하게 즉시 이상 행위로 간주했다. 그러나 실제 AI 서빙 워크로드에서는 워커가 모델 가중치·데이터셋을 HuggingFace/S3/사내 레지스트리 등에서 curl/wget으로 내려받는 것이 정상적인 운영이다 — "curl을 실행했는가"는 이상 행위의 신호가 아니고, "curl이 어디로 연결하는가"가 실제 신호다. 이를 반영해 curl/wget을 `suspicious_bins[]`에서 제외하고 판단을 목적지를 아는 SHADOW_CONNECT(및 LSM `socket_connect`)에게 전적으로 넘겼다. exec 시점에는 통과시키고, 실제 `connect()` 시도 시점에 목적지가 신뢰되지 않으면 그때 잡는다 — 새 메커니즘 없이 기존 defense-in-depth 구조(exec 계층/connect 계층)를 재활용한 것이다. `nc`/`ncat`은 AI 워커 계보에서 합법적으로 실행될 이유가 사실상 없고(리버스/바인드 셸 목적이 대부분이며, 바인드 셸은 `connect()`를 직접 호출하지 않아 SHADOW_CONNECT만으로는 못 잡을 수 있다) 목적지와 무관하게 exec 즉시 차단을 유지한다.
-
-**v5 — audit-only(감사 전용) 모드.** ModSecurity, Cloudflare WAF 등 가상 패치의 원조 도구들은 신규 룰을 배포할 때 보통 "탐지만 하고 차단은 안 함"(alert-only/dry-run) 단계를 거쳐 오탐을 관찰한 뒤에야 실제 차단으로 전환한다(2.2절). 본 논문의 기존 구현은 탐지=즉시 차단만 있었으므로, 이 단계적 배포를 지원하는 `enforce_mode` 전역 변수를 추가하였다. `watched_parents[]` 등과 달리 `const`가 아닌 일반 전역 변수(`.data` 섹션)로 선언하여, 재컴파일 없이 유저스페이스 로더 실행 시점(`--audit-only` 플래그)에 값을 설정할 수 있다 — enforce_mode=1(기본)이면 기존과 동일하게 즉시 SIGKILL/-EPERM 하고, 0이면 이벤트만 기록하고 실제 차단은 건너뛴다.
-
-**VM 실측 결과**: 신뢰 목적지 다운로드 시나리오(`curl http://127.0.0.1:8000/model.bin`, 더미 파일 서버)와 신뢰 안 된 목적지 시나리오(`curl http://1.1.1.1/`)를 v3(kprobe/SIGKILL)와 `kshield_vpatch_lsm` 양쪽에서, enforce/audit-only 두 모드로 재현하였다.
-
-```
-[v3, enforce] 신뢰 목적지 다운로드 → 로그 없음, 파일 정상 수신(HTTP 200)
-[v3, enforce] curl http://1.1.1.1/ →
-  SHADOW_CONNECT 탐지! parent=sh -> proc=curl(pid=820008) dst=1.1.1.1:80 => SIGKILL 전송
-[v3, audit-only] curl http://1.1.1.1/ →
-  SHADOW_CONNECT 탐지! parent=sh -> proc=curl(pid=820018) dst=1.1.1.1:80 => [AUDIT-ONLY] 차단 안 함(로그만)
-
-[v3_lsm, enforce] curl http://1.1.1.1/ →
-  LSM_CONNECT_BLOCK 탐지! proc=curl(pid=820034) parent=sh dst=1.1.1.1:80 => connect() -EPERM
-[v3_lsm, audit-only] curl http://1.1.1.1/ →
-  LSM_CONNECT_BLOCK 탐지! proc=curl(pid=820040) parent=sh dst=1.1.1.1:80 => [AUDIT-ONLY] connect() 허용됨(로그만)
-```
-
-두 시나리오 모두에서 SHADOW_EXEC/LSM_EXEC_BLOCK은 더 이상 curl에 발동하지 않았고(v4가 의도한 대로), 신뢰 목적지 다운로드는 완전히 정상 처리(오탐 제거 확인)되었으며, 신뢰 안 된 목적지로의 시도는 exec 대신 connect 계층에서 여전히 정확히 차단됨을 확인하였다(탐지 능력 손실 없음). enforce/audit-only 전환도 재컴파일 없이 `--audit-only` 플래그만으로 즉시 반영됨을 확인하였다.
-
-**남는 한계**: `watched_parents[]`, `trusted_dst_ipv4[]` 등 나머지 룰 배열은 여전히 rodata 컴파일 타임 상수라 재컴파일이 필요하다(5장 향후 연구). v4/v5는 각각 "실행 파일 이름 하나만으로 판단하지 않는다"와 "적어도 하나의 운영 파라미터는 재컴파일 없이 조정 가능하다"는 원칙을 부분적으로 적용한 것이며, 전체 룰셋의 런타임 갱신은 아직 미해결이다. (이 한계는 이후 3.9절(v8)에서 `trusted_dst_ipv4_map`에 한해 해소되었다 — `watched_parents[]`/`suspicious_bins[]`는 여전히 rodata로 남아 있다.)
-
-### 3.7 v6 — 감시 대상 프로세스 자신의 직접 행위 탐지
-
-**발견 경위**: 제출 전 자체 검토 과정에서, `current_is_watched()`의 판정 조건 — (a) 이미 `ai_worker_lineage` 맵에 있거나, (b) 직속 부모의 comm이 `watched_parents[]`와 일치 — 이 둘 다 "자손 프로세스"만 커버한다는 점을 재검토하였다. `trace_lineage_fork`는 포크가 발생할 때 "포크하는 쪽(부모)"의 comm이 `watched_parents[]`와 일치해야 그 **자식**을 계보에 등록하는데, 정작 감시 대상 프로세스 본인(예: `raylet`)은 어떤 fork 이벤트에서도 "등록되는 자식" 위치에 놓이지 않으므로 계보 맵에 절대 들어가지 않는다. 그 결과 `raylet` 자신이 **fork 없이 직접** `execve()`나 `connect()`를 호출하면, 계보에도 없고(자손이 아니므로) 직속 부모 검사도 통과하지 못해(raylet의 부모는 보통 systemd 등이지 raylet 자신이 아니므로) 어느 훅도 이를 감지하지 못한다. 지금까지의 모든 실험은 mock 서버가 entrypoint를 항상 `subprocess.run(["/bin/sh","-c",...])`로 실행했기 때문에, 이 경로는 한 번도 노출되지 않았었다.
-
-**수정**: `watched_parents[]`와 별도로 `watched_self[]`(`raylet`, `ray::IDLE`만 포함)를 추가하고, `current_is_watched()`에 "내 자신의 comm이 `watched_self[]`와 일치하는가"를 세 번째 조건으로 추가하였다. `watched_parents[]`를 그대로 재사용하지 않은 이유는, 그 배열에는 본 PoC 편의를 위한 `"python3"`처럼 매우 범용적인 이름이 포함되어 있어 자기 자신 검사에 그대로 쓰면 이 프로그램과 무관한 다른 python3 프로세스(공유 서버의 다른 사용자 스크립트 등)까지 AI 워커로 오인될 위험이 있기 때문이다. `watched_self[]`는 실제 Ray 워커 프로세스명만 담아 이 위험을 배제한다.
-
-**VM 실측 결과**: `/bin/nc`를 파일명만 `raylet`로 복사한 뒤(`cp /bin/nc /tmp/raylet`) 일반 bash 셸에서 직접(`/tmp/raylet 1.1.1.1 80`, fork 없이, 부모는 그냥 bash) 실행하여 재현하였다.
-
-```
-[v3] /tmp/raylet 1.1.1.1 80 (수정 전이라면 무탐지) →
-  SHADOW_CONNECT 탐지! parent=bash -> proc=raylet(pid=820134) dst=1.1.1.1:80 => SIGKILL 전송
-[v3_lsm] /tmp/raylet 1.1.1.1 80 →
-  LSM_CONNECT_BLOCK 탐지! proc=raylet(pid=820181) parent=bash dst=1.1.1.1:80 => connect() -EPERM
-
-[회귀 확인] 이름을 바꾸지 않은 평범한 nc(nc 1.1.1.1 80, v3/v3_lsm 양쪽) → 로그 없음, 정상 동작(무관한 프로세스는 여전히 영향 없음)
-```
-
-이름만 `raylet`인 프로세스가 fork 한 번 없이 자신의 직접 `connect()`로 잡혔고, 이름을 바꾸지 않은 평범한 `nc`는 v3·LSM 양쪽에서 여전히 아무 영향을 받지 않음을 확인하여 새 조건이 무관한 프로세스에 대한 오탐을 유발하지 않음을 검증하였다.
-
-**남는 한계**: 이 수정은 `watched_self[]`에 등록된 이름과 정확히 일치하는 comm에만 적용된다. 공격자가 프로세스 이름을 감시 목록에 없는 임의의 이름으로 바꿔서 실행하거나(예: `execve()`의 `argv[0]`만 바꾸는 것이 아니라 실제 바이너리 경로 자체를 다른 이름으로 배치), 애초에 감시 대상 프로세스의 메모리 공간 안에서 코드 인젝션으로 동작하는 경우(예: 별도 프로세스/exec 없이 기존 워커의 실행 흐름 자체를 탈취)에 대해서는 여전히 다루지 않는다.
-
 ---
 
-### 3.8 v7 — 데몬 재시작·최초 기동 시 계보 유실
+### 3.6 1차 — 데몬 재시작·최초 기동 시 계보 유실
 
-**발견 경위**: 기획 관점 재검토 과정에서, `ai_worker_lineage` 맵이 오직 `sched_process_fork` 훅이 발동하는 순간에만 채워진다는 점을 다시 살펴보았다 — 즉 "이 데몬이 켜져 있는 동안 새로 fork되는" 프로세스만 계보에 편입된다. 그런데 실제 운영에서는 이 데몬이 이미 AI 워커 클러스터가 한참 돌아가고 있는 상태에 나중에 배포되거나, 크래시나 업데이트로 재시작되는 경우가 흔하다. 이런 경우 데몬이 뜨기 전부터 이미 존재하던 워커의 자손 프로세스들은, v6에서 다룬 "감시 대상 자신"과는 또 다른 이유로 계보에서 누락된다 — 이들은 이미 fork가 끝난 상태이므로 fork 훅이 발동할 기회가 아예 없었고, 이후 그 프로세스가 다시 fork하기 전까지는 어느 훅도 이들을 계보로 인식하지 못한다.
+**발견 경위**: 기획 관점 재검토 과정에서, `ai_worker_lineage` 맵이 오직 `sched_process_fork` 훅이 발동하는 순간에만 채워진다는 점을 다시 살펴보았다 — 즉 "이 데몬이 켜져 있는 동안 새로 fork되는" 프로세스만 계보에 편입된다. 그런데 실제 운영에서는 이 데몬이 이미 AI 워커 클러스터가 한참 돌아가고 있는 상태에 나중에 배포되거나, 크래시나 업데이트로 재시작되는 경우가 흔하다. 이런 경우 데몬이 뜨기 전부터 이미 존재하던 워커의 자손 프로세스들은, 3.3절에서 다룬 "감시 대상 자신"과는 또 다른 이유로 계보에서 누락된다 — 이들은 이미 fork가 끝난 상태이므로 fork 훅이 발동할 기회가 아예 없었고, 이후 그 프로세스가 다시 fork하기 전까지는 어느 훅도 이들을 계보로 인식하지 못한다.
 
 **수정**: 커널 BPF 프로그램(맵 스키마, 훅 로직)은 전혀 건드리지 않고, 유저스페이스 로더가 attach 직후 1회 `/proc`을 스캔하여 이미 실행 중인 프로세스들의 조상(ancestor) 체인을 직접 확인하고, 감시 대상과 일치하면 동일한 `ai_worker_lineage` 맵에 `bpf_map_update_elem`으로 직접 채워 넣는다. 판정 기준 문자열(`watched_parents[]`/`watched_self[]`)은 유저스페이스 코드에 별도로 옮겨 적지 않고 이미 로드된 BPF 오브젝트의 rodata(`skel->rodata`)에서 그대로 읽어, 커널 쪽 목록과 유저스페이스 쪽 목록이 조용히 어긋나는 문제를 원천적으로 배제하였다.
 
-**VM 실측 결과**: 데몬을 켜기 전에 미리 `raylet`(파일명만 바꾼 bash) → `bash` → (20초 뒤) `curl`로 이어지는 2단계 자손 체인을 백그라운드로 띄워 둔 뒤, 그 상태에서 데몬을 새로 기동하여 백필 로그와 이후 탐지 여부를 확인하였다. curl의 직속 부모는 `raylet`이 아니라 중간의 `bash`이므로, 직속 부모 검사(v2~v6 기존 로직)만으로는 절대 잡을 수 없고 오직 계보 맵(백필)에 의존해야만 잡히는 경우다.
+**VM 실측 결과**: 데몬을 켜기 전에 미리 `raylet`(파일명만 바꾼 bash) → `bash` → (20초 뒤) `curl`로 이어지는 2단계 자손 체인을 백그라운드로 띄워 둔 뒤, 그 상태에서 데몬을 새로 기동하여 백필 로그와 이후 탐지 여부를 확인하였다. curl의 직속 부모는 `raylet`이 아니라 중간의 `bash`이므로, 직속 부모 검사(3.3절 기존 로직)만으로는 절대 잡을 수 없고 오직 계보 맵(백필)에 의존해야만 잡히는 경우다.
 
 ```
 $ sudo ./kshield_vpatch
@@ -344,13 +328,13 @@ $ sudo ./kshield_vpatch_lsm
 [04:49:22] LSM_CONNECT_BLOCK 탐지! proc=curl(pid=820428) parent=bash dst=1.1.1.1:80 => connect() -EPERM
 ```
 
-curl의 직속 부모가 `bash`인데도(v2의 직속 부모 검사로는 설명되지 않는데도) 정확히 잡혔다는 것은, 데몬 기동 전에 이미 떠 있던 `bash`가 백필로 계보에 편입되었고 그 `bash`가 이후 fork한 `curl` 자식이 (attach되어 있던) 라이브 `trace_lineage_fork` 훅을 통해 계보를 자동으로 물려받았다는 뜻이다. v3(SIGKILL)·LSM(사전 차단) 양쪽에서 동일하게 확인하였다.
+curl의 직속 부모가 `bash`인데도(3.3절의 직속 부모 검사로는 설명되지 않는데도) 정확히 잡혔다는 것은, 데몬 기동 전에 이미 떠 있던 `bash`가 백필로 계보에 편입되었고 그 `bash`가 이후 fork한 `curl` 자식이 (attach되어 있던) 라이브 `trace_lineage_fork` 훅을 통해 계보를 자동으로 물려받았다는 뜻이다. v3(SIGKILL)·LSM(사전 차단) 양쪽에서 동일하게 확인하였다.
 
 **남는 한계**: `/proc` 스캔(1차 목록 수집)과 맵 갱신(2차 판정) 사이에는 이론적으로 아주 좁은 경합 창이 있다 — 그 사이에 어떤 프로세스가 종료되고 그 PID가 무관한 새 프로세스에 재사용되면, 그 새 프로세스가 잘못 계보로 편입될 수 있다. 다만 이는 기존에도 존재하던 PID 재사용 리스크(3.3절, `sched_process_exit` 훅으로 완화)와 같은 계열이며, 그 프로세스가 종료되면 동일한 exit 훅으로 정리된다. 또한 이 백필은 데몬 기동 시점에 1회만 수행되므로, 데몬이 오래 켜져 있는 동안 새로 등장하는 감시 대상은 백필이 아니라 기존의 라이브 fork 훅으로 계속 정상적으로 추적된다.
 
 ---
 
-### 3.9 v8/v9 — 운영 장벽 해소: 런타임 제어 계층과 SIEM 연동
+### 3.7 2차/3차 — 운영 장벽 해소: 런타임 제어 계층과 SIEM 연동
 
 **발견 경위**: 제출 전 검토에서 받은 리뷰어 성격의 지적 세 가지를 한데 모아 다루었다. (1) `trusted_dst_ipv4[]`가 컴파일 타임 rodata 배열이라, 클라우드 스토리지(S3, HuggingFace 등)처럼 실제 운영에서 수시로 바뀌는 신뢰 목적지를 추가할 때마다 재컴파일·재배포가 필요해 SecOps 팀이 이 도구를 도입할 유인이 없다는 지적. (2) 이 도구가 perf buffer/표준출력에만 이벤트를 남겨, 이미 SIEM(Splunk, ELK 등)을 운영 중인 조직의 기존 로그 파이프라인과 단절되어 있다는 지적. (3) AI 학습·추론 job은 GPU를 몇 시간~몇 주씩 점유하므로 오탐으로 SIGKILL당했을 때의 비용이 매우 큰데도, audit-only 모드만으로는 "특정 사용자만 예외 처리"하는 세밀한 제어가 불가능하다는 지적.
 
@@ -387,18 +371,18 @@ Sep 07 16:08:34 ... {"tool":"kshield_vpatch","event":"SHADOW_CONNECT","parent_co
 
 6회 시도 중 예외(신뢰 IP 또는 예외 UID)가 적용된 2회(시도2, 시도5)만 정확히 통과(로그 자체가 없음)했고, 나머지 4회(시도1, 3, 4, 6)는 모두 차단되어 `journalctl`에 JSON 4건으로 정확히 대응됨을 확인하였다 — 신뢰 IP·예외 UID의 등록·해제 모두 데몬을 재시작하거나 재컴파일하지 않고 실행 중에 즉시 반영됨을 실측으로 검증하였다.
 
-**남는 한계**: (1) `watched_parents[]`/`suspicious_bins[]`는 여전히 rodata로 남아 있어, 감시 대상 프로세스명·의심 바이너리 목록을 바꾸려면 재컴파일이 필요하다 — 신뢰 목적지 IP만큼 자주 바뀌는 값이 아니라는 판단으로 이번 개선에서는 범위 밖으로 두었다(→ 이 한계는 3.10절(v10)에서 해소되었다). (2) 예외 처리는 UID 단위까지만 지원하며, 쿠버네티스 네임스페이스·cgroup 단위의 더 세밀한 예외는 아직 없다(→ cgroup 단위는 3.10절(v10)에서 부분적으로 다룬다). (3) syslog 연동은 로컬 syslog 소켓에 메시지가 정확히 도달하는 것까지만 확인하였고, 실제 SIEM(Splunk, ELK 등)까지 도달해 파싱되는지는 로그 포워더 설정에 달려 있어 별도로 검증하지 않았다(3번은 여전히 미해결).
+**남는 한계**: (1) `watched_parents[]`/`suspicious_bins[]`는 여전히 rodata로 남아 있어, 감시 대상 프로세스명·의심 바이너리 목록을 바꾸려면 재컴파일이 필요하다 — 신뢰 목적지 IP만큼 자주 바뀌는 값이 아니라는 판단으로 이번 개선에서는 범위 밖으로 두었다(→ 이 한계는 3.8절(4차)에서 해소되었다). (2) 예외 처리는 UID 단위까지만 지원하며, 쿠버네티스 네임스페이스·cgroup 단위의 더 세밀한 예외는 아직 없다(→ cgroup 단위는 3.8절(4차)에서 부분적으로 다룬다). (3) syslog 연동은 로컬 syslog 소켓에 메시지가 정확히 도달하는 것까지만 확인하였고, 실제 SIEM(Splunk, ELK 등)까지 도달해 파싱되는지는 로그 포워더 설정에 달려 있어 별도로 검증하지 않았다(3번은 여전히 미해결).
 
 ---
 
-### 3.10 v10 — 남은 rodata 룰의 런타임화와 cgroup 단위 예외
+### 3.8 4차 — 남은 rodata 룰의 런타임화와 cgroup 단위 예외
 
-**발견 경위**: 3.9절(v8/v9)에서 "하드코딩된 rodata 룰" 지적은 신뢰 목적지 IP(`trusted_dst_ipv4[]`)에 한해서만 해소했고, `watched_parents[]`(감시 대상 프로세스명)·`suspicious_bins[]`(의심 바이너리 목록)는 "IP만큼 자주 안 바뀐다"는 이유로 범위 밖에 남겨 두었다. 다시 검토해보니 이 판단이 실무적으로 타당하지 않을 수 있다 — 예를 들어 대상 프레임워크를 Ray에서 Triton/vLLM으로 바꾸거나, 새로 발견된 CVE에 대응해 감시 대상을 추가하는 상황은 신뢰 IP 추가만큼이나 자주 일어날 수 있고, 그때마다 재컴파일이 필요하다는 건 여전히 동일한 운영 장벽이다. 아울러 "예외 처리는 UID 단위까지만 가능하다"는 3.9절의 한계도, 원 지적("유저 **또는** 네임스페이스")의 절반만 해소한 상태였다.
+**발견 경위**: 3.7절(2차/3차)에서 "하드코딩된 rodata 룰" 지적은 신뢰 목적지 IP(`trusted_dst_ipv4[]`)에 한해서만 해소했고, `watched_parents[]`(감시 대상 프로세스명)·`suspicious_bins[]`(의심 바이너리 목록)는 "IP만큼 자주 안 바뀐다"는 이유로 범위 밖에 남겨 두었다. 다시 검토해보니 이 판단이 실무적으로 타당하지 않을 수 있다 — 예를 들어 대상 프레임워크를 Ray에서 Triton/vLLM으로 바꾸거나, 새로 발견된 CVE에 대응해 감시 대상을 추가하는 상황은 신뢰 IP 추가만큼이나 자주 일어날 수 있고, 그때마다 재컴파일이 필요하다는 건 여전히 동일한 운영 장벽이다. 아울러 "예외 처리는 UID 단위까지만 가능하다"는 3.7절의 한계도, 원 지적("유저 **또는** 네임스페이스")의 절반만 해소한 상태였다.
 
 **수정**:
 - `watched_parents[]`/`watched_self[]`/`suspicious_bins[]`를 `trusted_dst_ipv4_map`과 동일한 방식으로 `watched_parents_map`/`watched_self_map`/`suspicious_bins_map`(BPF 해시맵)으로 전환하였다. `is_watched_comm()`/`is_watched_self()`는 각각 맵 조회 한 줄로 줄었고, `suspicious_bins[]` 순회 루프도 맵 조회 한 줄로 대체되었다. 세 맵 모두 comm/파일경로 문자열 자체를 고정폭 바이트 배열(각각 16바이트, 64바이트)로 만든 값을 key로 쓴다 — comm/파일명을 읽는 기존 코드가 이미 고정 크기 버퍼를 0으로 초기화한 뒤 채우는 관례를 따르고 있어서, 맵 key와 정확히 같은 바이트 배열이 자연스럽게 만들어진다.
 - 로더는 이 세 맵이 "새로 생성되는"(핀 경로가 로드 *전에* 존재하지 않았던) 경우에만 기존 PoC 기본값(`raylet`/`ray::IDLE`/`python3`, `nc`/`ncat` 경로 등)을 시드로 채운다. 데몬이 재시작될 때는 이미 핀되어 있던 맵을 그대로 재사용하므로, 운영자가 `kshield_ctl`로 바꿔둔 값이 재시작 때마다 기본값으로 되돌아가지 않는다.
-- v7(3.8절)의 `/proc` 백필 로직도 함께 갱신하였다 — 더 이상 `skel->rodata`에서 감시 목록을 읽을 수 없으므로(그 필드 자체가 없어짐), 핀된 맵의 fd를 직접 받아 `bpf_map_lookup_elem()`으로 조회하도록 바꾸었다. 백필이 "지금 이 순간 운영자가 설정해 둔 최신 감시 목록" 기준으로 동작한다는 점에서 오히려 더 정확해졌다.
+- 1차(3.6절)의 `/proc` 백필 로직도 함께 갱신하였다 — 더 이상 `skel->rodata`에서 감시 목록을 읽을 수 없으므로(그 필드 자체가 없어짐), 핀된 맵의 fd를 직접 받아 `bpf_map_lookup_elem()`으로 조회하도록 바꾸었다. 백필이 "지금 이 순간 운영자가 설정해 둔 최신 감시 목록" 기준으로 동작한다는 점에서 오히려 더 정확해졌다.
 - `exempt_cgroups_map`(key=cgroup ID)을 `exempt_uids_map`과 동일한 구조로 추가하여, UID보다 더 세밀한 컨테이너/파드 단위 예외를 지원한다. 다만 **쿠버네티스 "네임스페이스" 자체는 커널이 아는 개념이 아니라 K8s API 서버가 관리하는 논리적 그룹**이라 eBPF에서 직접 관측할 수 없다 — 컨테이너/파드 하나하나가 보통 자신만의 cgroup을 갖는다는 점을 이용한 근사치이며, "네임스페이스 인지"라고 과장하지 않고 "cgroup(≈컨테이너/파드) 단위"로 정확히 이름 붙였다.
 - `kshield_ctl`은 리소스가 여섯 종류(`trust-`, `exempt-`, `cgroup-exempt-`, `parent-`, `self-`, `bin-`)가 되면서, 명령 접두사로 리소스를 판별하는 방식으로 재구성하였다.
 
@@ -431,15 +415,15 @@ $ timeout 5 /tmp/myworker2 http://1.1.1.1/   → 종료 코드: 124 (안 잡힘,
 
 **`cgroup-exempt-*`의 VM 검증(추가 라운드)**: 처음 구현 당시에는 `exempt_uids_map`과 동일한 코드 경로(핀 → 조회 → `current_is_watched()` 최우선 확인)를 공유한다는 점에만 근거해 VM 검증을 생략하였다. 이번에 실제 cgroup v2 환경에서 직접 확인하였다 — 테스트용 cgroup(`/sys/fs/cgroup/kshield_test_cgroup`, cgroup ID는 해당 디렉터리의 inode 번호로 확인 가능)을 만들고, 그 cgroup 안에서 실행한 공격(`nc`, fork 강제 재현)이 예외 등록 전에는 0.007초 만에 차단되었다. `kshield_ctl cgroup-exempt-add <cgroup_id>`로 등록한 뒤 같은 cgroup에서 재현하자 차단되지 않고 `nc` 자신의 타임아웃(2초, 실측 2.010초)까지 그대로 실행되었고, `cgroup-exempt-del`로 삭제한 뒤에는 다시 0.006초 만에 차단됨을 확인하였다 — `exempt_uids_map`과 동일한 신뢰도로 동작함을 실측으로 확정하였다.
 
-**남는 한계**: (1) 진짜 쿠버네티스 네임스페이스 단위 예외는 여전히 근본적으로 불가능하다 — cgroup ID는 근사치일 뿐이며, cgroup-to-네임스페이스 매핑을 알려면 K8s API를 감시하는 별도 컨트롤 플레인이 필요하다(범위 밖). (2) syslog의 SIEM 종단 도달 검증은 3.9절과 동일하게 미해결로 남는다. (3) `kshield_ctl`의 하위 명령이 이제 18개(6개 리소스 × 3개 동작)로 늘어나, 다수 규칙을 한 번에 넣는 벌크 가져오기/설정 파일 기능은 아직 없다.
+**남는 한계**: (1) 진짜 쿠버네티스 네임스페이스 단위 예외는 여전히 근본적으로 불가능하다 — cgroup ID는 근사치일 뿐이며, cgroup-to-네임스페이스 매핑을 알려면 K8s API를 감시하는 별도 컨트롤 플레인이 필요하다(범위 밖). (2) syslog의 SIEM 종단 도달 검증은 3.7절과 동일하게 미해결로 남는다. (3) `kshield_ctl`의 하위 명령이 이제 18개(6개 리소스 × 3개 동작)로 늘어나, 다수 규칙을 한 번에 넣는 벌크 가져오기/설정 파일 기능은 아직 없다.
 
-### 3.11 v11 — 데몬 크래시 시 fail-open 문제와 BPF link 핀
+### 3.9 5차 — 데몬 크래시 시 fail-open 문제와 BPF link 핀
 
 **발견 경위**: 4.5절에서 이미 Falco·Tetragon과 오버헤드·탐지 방식을 비교했지만, "데몬 프로세스 자체가 죽으면 어떻게 되는가"는 비교한 적이 없었다. 이를 확인하기 위해 kShield-VirtualPatch와 Tetragon 양쪽에서 데몬을 `kill -9`(정상 종료가 아닌, 크래시를 흉내 낸 강제 종료)로 죽인 뒤 커널에 BPF 프로그램이 남아있는지, 같은 공격이 여전히 차단되는지를 VM에서 직접 확인하였다. kShield-VirtualPatch는 `kill -9` 직후 `bpftool prog list`에서 `trace_shadow_exec`/`trace_shadow_connect_v4`/`trace_shadow_connect_v6` 전부가 사라졌다 — 데몬과 함께 커널의 탐지 로직 자체가 통째로 사라지는 **fail-open**이었다. 반면 Tetragon은 `kill -9` 후에도 `generic_kprobe_*` 프로그램 7개가 그대로 남아 있었는데, 우연히 그 시점에 systemd가 이미 재시작시킨 결과가 아닌지 확인하기 위해 재시작 지연(`RestartUSec=5s`)이 지나기 전인 첫 2초 동안 200ms 간격으로 `MainPID`와 BPF 프로그램 수를 함께 추적하였다 — 10회 샘플 전부 `MainPID=0`(데몬이 완전히 죽어 있음)이면서 BPF 프로그램 수는 7개로 그대로였다. 즉 Tetragon은 데몬이 실제로 완전히 죽어 있는 동안에도 커널 쪽 판정·차단이 데몬과 무관하게 계속 동작하고, kShield-VirtualPatch는 그렇지 않았다.
 
-원인은 v8~v10에서 `trusted_dst_ipv4_map` 등 **맵**은 `bpffs`에 핀했지만, 실제 판정·SIGKILL을 수행하는 BPF **프로그램의 부착(attach, `struct bpf_link`)** 자체는 한 번도 핀한 적이 없었다는 것이다. 데몬 프로세스가 그 attach를 가리키는 파일 디스크립터를 들고 있다가, 프로세스가 죽으며 fd가 함께 닫히면 커널이 참조 카운트 0을 보고 프로그램을 자동으로 회수한다.
+원인은 2차~4차에서 `trusted_dst_ipv4_map` 등 **맵**은 `bpffs`에 핀했지만, 실제 판정·SIGKILL을 수행하는 BPF **프로그램의 부착(attach, `struct bpf_link`)** 자체는 한 번도 핀한 적이 없었다는 것이다. 데몬 프로세스가 그 attach를 가리키는 파일 디스크립터를 들고 있다가, 프로세스가 죽으며 fd가 함께 닫히면 커널이 참조 카운트 0을 보고 프로그램을 자동으로 회수한다.
 
-**수정**: 다섯 개 프로그램(`trace_lineage_fork`, `trace_lineage_exit`, `trace_shadow_exec`, `trace_shadow_connect_v4`, `trace_shadow_connect_v6`)의 link를 attach 직후 `bpffs`에 핀한다. 재시작 시 이전 실행(크래시)이 남긴 핀이 있으면, **새 attach를 먼저 만든 뒤에** 옛 핀을 지운다 — 이 순서라면 옛 attach가 사라지는 시점엔 이미 새 attach가 똑같이 동작 중이라 보호 공백이 생기지 않는다. 다만 이 모든 게 "데몬을 다시 띄워야" 일어나는 일이므로, kShield-VirtualPatch 자체는 크래시 후 자동 재시작(systemd `Restart=on-failure` 같은) 기능이 없어 이 경로가 실제로 언제 실행될지는 운영자가 데몬을 다시 띄우는 시점에 달려 있다 — v11이 보장하는 것은 "재시작 전까지도 커널이 계속 막아준다"는 것이지, "자동으로 재시작된다"는 것은 아니다. 반대로 SIGINT/SIGTERM 같은 의도된 종료에서는 운영자가 실제로 보호를 끄고 싶은 것이므로, 종료 직전에 핀을 명시적으로 지운다. 지금까지는 SIGINT만 잡았는데, `kill <pid>`나 `systemctl stop`의 기본 시그널은 SIGTERM이라 이번에 함께 잡도록 추가하였다. `kill -9`(SIGKILL)는 애초에 어떤 핸들러도 타지 않으므로 이 unpin 경로를 거치지 않고, 그래서 핀이 그대로 남아 계속 보호한다 — 의도한 동작이다.
+**수정**: 다섯 개 프로그램(`trace_lineage_fork`, `trace_lineage_exit`, `trace_shadow_exec`, `trace_shadow_connect_v4`, `trace_shadow_connect_v6`)의 link를 attach 직후 `bpffs`에 핀한다. 재시작 시 이전 실행(크래시)이 남긴 핀이 있으면, **새 attach를 먼저 만든 뒤에** 옛 핀을 지운다 — 이 순서라면 옛 attach가 사라지는 시점엔 이미 새 attach가 똑같이 동작 중이라 보호 공백이 생기지 않는다. 다만 이 모든 게 "데몬을 다시 띄워야" 일어나는 일이므로, kShield-VirtualPatch 자체는 크래시 후 자동 재시작(systemd `Restart=on-failure` 같은) 기능이 없어 이 경로가 실제로 언제 실행될지는 운영자가 데몬을 다시 띄우는 시점에 달려 있다 — 이번 수정이 보장하는 것은 "재시작 전까지도 커널이 계속 막아준다"는 것이지, "자동으로 재시작된다"는 것은 아니다. 반대로 SIGINT/SIGTERM 같은 의도된 종료에서는 운영자가 실제로 보호를 끄고 싶은 것이므로, 종료 직전에 핀을 명시적으로 지운다. 지금까지는 SIGINT만 잡았는데, `kill <pid>`나 `systemctl stop`의 기본 시그널은 SIGTERM이라 이번에 함께 잡도록 추가하였다. `kill -9`(SIGKILL)는 애초에 어떤 핸들러도 타지 않으므로 이 unpin 경로를 거치지 않고, 그래서 핀이 그대로 남아 계속 보호한다 — 의도한 동작이다.
 
 **VM 실측 결과**: 수정 후 재빌드하여 같은 시나리오를 재현하였다.
 
@@ -466,19 +450,19 @@ $ sudo ls /sys/fs/bpf/ | grep kshield_link
 
 **`kshield_vpatch_lsm`(3.5절)으로 확장**: 이 발견이 SIGKILL 기반 컴포넌트만의 문제인지, 동기적 사전 차단(LSM) 컴포넌트에도 같은 문제가 있는지 이어서 확인하였다. 강제 종료 전 `execve(nc)`는 0.008초 만에 `-EPERM`(종료 코드 126)으로 즉시 실패했으나, `kill -9` 직후 `bpftool prog list`에서 네 프로그램(`trace_lineage_fork/exit`, `kshield_lsm_bprm_check`, `kshield_lsm_socket_connect`) 전부가 사라졌고, 같은 시도가 이번에는 2.010초 동안 실제로 실행되어(nc 자신의 `-w 2` 타임아웃과 일치) fail-open이 그대로 재현되었다. `kshield_vpatch.c`와 동일한 수정(네 개 link를 `bpffs`에 핀, 재시작 시 새 attach 우선 생성, SIGINT/SIGTERM에서만 명시적 unpin)을 적용한 뒤 재검증한 결과, `kill -9` 후에도 네 프로그램이 전부 잔존하며 `execve(nc)`가 여전히 0.006초 만에 즉시 차단되었고, SIGTERM으로는 핀이 실제로 사라짐(정상 종료 시 보호가 꺼짐)도 확인하였다 — 두 컴포넌트 모두 같은 근본 원인·같은 수정으로 해소되었다.
 
-**재시작 핸드오프 구간의 밀리초 단위 재측정**: 위 검증은 "데몬이 재시작 없이 계속 죽어 있는 동안"만 다루었을 뿐, 실제로 재시작이 일어나는 순간 자체는 겨냥하지 않았다. 이를 보완하기 위해 `kshield_vpatch_lsm`과 `kshield_vpatch`(kprobe/SIGKILL 기반) 양쪽에서, `kill -9` 후 2초 대기(위와 동일하게 커널에 남은 프로그램이 계속 차단함을 재확인)한 다음 데몬을 수동으로 재기동함과 동시에 공격(`watched_parents[]`에 등록된 이름으로 위장한 bash, 즉 3.8절과 동일한 `/tmp/raylet`가 자식으로 `nc`를 실행)을 간격 없이 150회 연속 재현하여 각 시도의 소요시간을 기록하였다. `kshield_vpatch_lsm`은 150회 전부 0.004~0.005초 내로 즉시 차단(`execve()` `-EPERM`, 종료 코드 126)되었고 표본 구간은 약 2.82초였다. `kshield_vpatch`(SIGKILL)도 동일하게 150회 전부 0.006~0.008초 내로 즉시 차단되었고 표본 구간은 약 3.10초로, 두 구간 모두 데몬 재기동(BPF 스켈레톤 로드·attach·핀 재생성) 과정 전체를 포괄한다. 재시작된 각 데몬 자신의 로그에도 150회 각각이 정상적으로 탐지·기록되어 있었고, 재기동 후 핀 파일이 모두 정상적으로 재생성된 것도 함께 확인하였다.
+**재시작 핸드오프 구간의 밀리초 단위 재측정**: 위 검증은 "데몬이 재시작 없이 계속 죽어 있는 동안"만 다루었을 뿐, 실제로 재시작이 일어나는 순간 자체는 겨냥하지 않았다. 이를 보완하기 위해 `kshield_vpatch_lsm`과 `kshield_vpatch`(kprobe/SIGKILL 기반) 양쪽에서, `kill -9` 후 2초 대기(위와 동일하게 커널에 남은 프로그램이 계속 차단함을 재확인)한 다음 데몬을 수동으로 재기동함과 동시에 공격(`watched_parents[]`에 등록된 이름으로 위장한 bash, 즉 3.6절과 동일한 `/tmp/raylet`가 자식으로 `nc`를 실행)을 간격 없이 150회 연속 재현하여 각 시도의 소요시간을 기록하였다. `kshield_vpatch_lsm`은 150회 전부 0.004~0.005초 내로 즉시 차단(`execve()` `-EPERM`, 종료 코드 126)되었고 표본 구간은 약 2.82초였다. `kshield_vpatch`(SIGKILL)도 동일하게 150회 전부 0.006~0.008초 내로 즉시 차단되었고 표본 구간은 약 3.10초로, 두 구간 모두 데몬 재기동(BPF 스켈레톤 로드·attach·핀 재생성) 과정 전체를 포괄한다. 재시작된 각 데몬 자신의 로그에도 150회 각각이 정상적으로 탐지·기록되어 있었고, 재기동 후 핀 파일이 모두 정상적으로 재생성된 것도 함께 확인하였다.
 
-이 재측정 과정에서 v11과는 무관한 별개의 방법론적 함정을 하나 발견하였다. `kshield_vpatch`(kprobe) 재현에 처음에는 `/tmp/raylet -c "nc -w 2 <IP> 80"`처럼 단일 명령을 그대로 썼는데, 이 경우 bash가 fork 없이 자기 자신을 `execve()`로 `nc`로 치환하는 최적화를 수행한다. `tp/sched/sched_process_exec` 훅은 `execve()` 완료 *이후*에 발동하므로 그 시점엔 이미 `comm`이 `raylet`에서 `nc`로 바뀌어 있어 `watched_self[]`(3.7절, v6)에 매칭되지 않고, fork가 없었으니 `ai_worker_lineage`에도 등록되지 않아 탐지 자체가 발생하지 않았다(150회 전부 2.008초 동안 실제로 실행되어 탐지 실패로 나타남). 반면 `kshield_vpatch_lsm`의 `bprm_check_security`는 `execve()` *이전*에 발동하므로 그 시점엔 `comm`이 아직 `raylet`라 `watched_self[]` 매칭이 그대로 성공한다 — 같은 코드(`watched_self[]` 검사)가 훅의 실행 시점 차이만으로 kprobe 쪽에서만 무력화된 것이다. 3.9절에서 쓴 것과 같이 파이프(`| cat`)를 추가해 bash가 `nc`를 별도 자식으로 fork하도록 강제하자(→ `ai_worker_lineage` 경로로 정상 등록·탐지), 두 컴포넌트 모두 동일하게 즉시 차단되었다 — 이후 보고한 150회 결과는 이 fork 강제 재현으로 얻은 것이다.
+이 재측정 과정에서 5차와는 무관한 별개의 방법론적 함정을 하나 발견하였다. `kshield_vpatch`(kprobe) 재현에 처음에는 `/tmp/raylet -c "nc -w 2 <IP> 80"`처럼 단일 명령을 그대로 썼는데, 이 경우 bash가 fork 없이 자기 자신을 `execve()`로 `nc`로 치환하는 최적화를 수행한다. `tp/sched/sched_process_exec` 훅은 `execve()` 완료 *이후*에 발동하므로 그 시점엔 이미 `comm`이 `raylet`에서 `nc`로 바뀌어 있어 `watched_self[]`(3.3절)에 매칭되지 않고, fork가 없었으니 `ai_worker_lineage`에도 등록되지 않아 탐지 자체가 발생하지 않았다(150회 전부 2.008초 동안 실제로 실행되어 탐지 실패로 나타남). 반면 `kshield_vpatch_lsm`의 `bprm_check_security`는 `execve()` *이전*에 발동하므로 그 시점엔 `comm`이 아직 `raylet`라 `watched_self[]` 매칭이 그대로 성공한다 — 같은 코드(`watched_self[]` 검사)가 훅의 실행 시점 차이만으로 kprobe 쪽에서만 무력화된 것이다. 3.8절에서 쓴 것과 같이 파이프(`| cat`)를 추가해 bash가 `nc`를 별도 자식으로 fork하도록 강제하자(→ `ai_worker_lineage` 경로로 정상 등록·탐지), 두 컴포넌트 모두 동일하게 즉시 차단되었다 — 이후 보고한 150회 결과는 이 fork 강제 재현으로 얻은 것이다.
 
-**제어 평면(`kshield_ctl`)의 데몬 독립성 확인**: v11의 핵심 주장은 "데몬이 죽어도 커널의 판정·차단 로직은 계속 동작한다"는 것이었다. 이 주장의 자연스러운 확장으로, 데몬이 완전히 죽어 있는 동안 운영자가 `kshield_ctl`로 설정을 바꾸는 것도 가능한지, 그리고 그 변경이 죽어 있는 데몬과 무관하게 즉시 반영되는지를 확인하였다. `kshield_vpatch`를 정상 기동한 뒤 `kill -9`로 강제 종료하고 데몬이 완전히 죽어 있음을 `pgrep`으로 재확인한 상태에서, 신뢰 안 된 목적지(`203.0.113.1`)로의 `curl` 공격 재현(exec에는 안 걸리고 connect 계층에서만 걸리는 경로)이 0.017초 만에 차단됨을 먼저 확인하였다. 이 상태 그대로 `sudo ./kshield_ctl trust-add 203.0.113.1`을 실행하자 명령이 정상 완료되고 `trust-list`에도 즉시 반영되었으며, 같은 공격을 재현하자 이번에는 차단되지 않고 `curl` 자신의 타임아웃(2초, 실측 2.018초)까지 그대로 실행되었다 — 데몬 프로세스가 존재하지 않는 상태에서 방금 추가한 신뢰 설정이 커널의 판정에 즉시 반영된 것이다. 이어서 같은 상태에서 `trust-del`로 되돌리자 `trust-list`도 즉시 비워졌고, 재현 공격도 다시 0.016초 만에 차단되어 원상복구까지 확인하였다. 전 과정(추가→통과 확인→삭제→차단 확인)에서 데몬 프로세스는 단 한 번도 재기동되지 않았다(`pgrep`으로 각 단계마다 재확인). 이는 v8~v10에서 맵을 `bpffs`에 핀한 설계와 v11에서 프로그램 link까지 핀한 설계가 결합하여, 제어 평면(`kshield_ctl`)과 데이터 평면(커널의 판정 로직) 모두 유저스페이스 데몬 프로세스의 생존 여부와 완전히 독립적으로 동작함을 보여준다.
+**제어 평면(`kshield_ctl`)의 데몬 독립성 확인**: 5차의 핵심 주장은 "데몬이 죽어도 커널의 판정·차단 로직은 계속 동작한다"는 것이었다. 이 주장의 자연스러운 확장으로, 데몬이 완전히 죽어 있는 동안 운영자가 `kshield_ctl`로 설정을 바꾸는 것도 가능한지, 그리고 그 변경이 죽어 있는 데몬과 무관하게 즉시 반영되는지를 확인하였다. `kshield_vpatch`를 정상 기동한 뒤 `kill -9`로 강제 종료하고 데몬이 완전히 죽어 있음을 `pgrep`으로 재확인한 상태에서, 신뢰 안 된 목적지(`203.0.113.1`)로의 `curl` 공격 재현(exec에는 안 걸리고 connect 계층에서만 걸리는 경로)이 0.017초 만에 차단됨을 먼저 확인하였다. 이 상태 그대로 `sudo ./kshield_ctl trust-add 203.0.113.1`을 실행하자 명령이 정상 완료되고 `trust-list`에도 즉시 반영되었으며, 같은 공격을 재현하자 이번에는 차단되지 않고 `curl` 자신의 타임아웃(2초, 실측 2.018초)까지 그대로 실행되었다 — 데몬 프로세스가 존재하지 않는 상태에서 방금 추가한 신뢰 설정이 커널의 판정에 즉시 반영된 것이다. 이어서 같은 상태에서 `trust-del`로 되돌리자 `trust-list`도 즉시 비워졌고, 재현 공격도 다시 0.016초 만에 차단되어 원상복구까지 확인하였다. 전 과정(추가→통과 확인→삭제→차단 확인)에서 데몬 프로세스는 단 한 번도 재기동되지 않았다(`pgrep`으로 각 단계마다 재확인). 이는 2차~4차에서 맵을 `bpffs`에 핀한 설계와 5차에서 프로그램 link까지 핀한 설계가 결합하여, 제어 평면(`kshield_ctl`)과 데이터 평면(커널의 판정 로직) 모두 유저스페이스 데몬 프로세스의 생존 여부와 완전히 독립적으로 동작함을 보여준다.
 
-**남는 한계**: (1) 호스트 자체가 재부팅되는 경우는 다루지 않는다 — `bpffs`는 보통 메모리 기반이라 재부팅되면 핀도 함께 사라지므로, 이 수정이 보장하는 것은 "데몬만 크래시하는" 상황에 한정된다(두 컴포넌트 공통). (2) 재시작 핸드오프 구간은 위 재측정으로 밀리초 단위(약 15~20ms 간격, 150표본, 단일 세션 1회, 두 컴포넌트 공통)에서는 공백이 없음을 실측으로 확인하였다. 다만 이는 "이 해상도에서 못 찾았다"는 것이지 완전한 증명은 아니다 — 측정 방식 자체가 유저스페이스에서 `nc` 프로세스를 매번 새로 fork/exec하는 방식이라 그 fork/exec 오버헤드(수 ms)보다 짧은 공백은 원천적으로 관측할 수 없다. 코드상 진짜 위험 구간인 `bpf_link__pin`/`unlink` 교체 찰나의 마이크로초 단위 공백 유무는 `bpf_ktime_get_ns()` 기반의 커널 내부 계측이 별도로 필요하다. (3) 두 컴포넌트 모두 Tetragon의 `Restart=on-failure` 같은 자동 재시작 기능이 없다 — 이번 수정은 "재시작 전까지 계속 막아준다"는 것이지 "알아서 재시작된다"는 것은 아니며, 자동 재시작은 systemd 유닛 등 별도 운영 설정의 몫으로 남겨 둔다. (4) `watched_self[]`(3.7절, v6)는 kprobe 기반 컴포넌트에서 fork 없는 self-exec 치환 케이스를 탐지하지 못한다는 것이 이번에 새로 확인되었다 — LSM 컴포넌트는 훅 타이밍 덕분에 이 케이스도 잡지만 kprobe 컴포넌트는 별도 보완이 필요하다(→ 3.12절(v12)에서 해소). (5) 데몬 독립성 확인은 `trust-add/del`(신뢰 IP)에 한해서만 직접 검증하였다 — `parent-add`/`self-add`/`bin-add`/`exempt-add`/`cgroup-exempt-*`도 3.9~3.10절에서 확인한 것과 동일한 핀된 맵 기반 코드 경로를 공유하므로 같은 수준으로 동작할 것으로 예상하나, 각각을 데몬 사망 상태에서 개별 재검증하지는 않았다.
+**남는 한계**: (1) 호스트 자체가 재부팅되는 경우는 다루지 않는다 — `bpffs`는 보통 메모리 기반이라 재부팅되면 핀도 함께 사라지므로, 이 수정이 보장하는 것은 "데몬만 크래시하는" 상황에 한정된다(두 컴포넌트 공통). (2) 재시작 핸드오프 구간은 위 재측정으로 밀리초 단위(약 15~20ms 간격, 150표본, 단일 세션 1회, 두 컴포넌트 공통)에서는 공백이 없음을 실측으로 확인하였다. 다만 이는 "이 해상도에서 못 찾았다"는 것이지 완전한 증명은 아니다 — 측정 방식 자체가 유저스페이스에서 `nc` 프로세스를 매번 새로 fork/exec하는 방식이라 그 fork/exec 오버헤드(수 ms)보다 짧은 공백은 원천적으로 관측할 수 없다. 코드상 진짜 위험 구간인 `bpf_link__pin`/`unlink` 교체 찰나의 마이크로초 단위 공백 유무는 `bpf_ktime_get_ns()` 기반의 커널 내부 계측이 별도로 필요하다. (3) 두 컴포넌트 모두 Tetragon의 `Restart=on-failure` 같은 자동 재시작 기능이 없다 — 이번 수정은 "재시작 전까지 계속 막아준다"는 것이지 "알아서 재시작된다"는 것은 아니며, 자동 재시작은 systemd 유닛 등 별도 운영 설정의 몫으로 남겨 둔다. (4) `watched_self[]`(3.3절)는 kprobe 기반 컴포넌트에서 fork 없는 self-exec 치환 케이스를 탐지하지 못한다는 것이 이번에 새로 확인되었다 — LSM 컴포넌트는 훅 타이밍 덕분에 이 케이스도 잡지만 kprobe 컴포넌트는 별도 보완이 필요하다(→ 3.10절(6차)에서 해소). (5) 데몬 독립성 확인은 `trust-add/del`(신뢰 IP)에 한해서만 직접 검증하였다 — `parent-add`/`self-add`/`bin-add`/`exempt-add`/`cgroup-exempt-*`도 3.7~3.8절에서 확인한 것과 동일한 핀된 맵 기반 코드 경로를 공유하므로 같은 수준으로 동작할 것으로 예상하나, 각각을 데몬 사망 상태에서 개별 재검증하지는 않았다.
 
 ---
 
-### 3.12 v12 — `watched_self[]`의 fork 없는 self-exec 치환 탐지
+### 3.10 6차 — `watched_self[]`의 fork 없는 self-exec 치환 탐지
 
-**발견 경위**: 3.11절의 재시작 핸드오프 재측정 중, `kshield_vpatch`(kprobe) 재현에 파이프 없는 단일 명령(`/tmp/raylet -c "nc -w 2 <IP> 80"`)을 쓰면 공격이 전혀 탐지되지 않는 현상을 우연히 발견하였다. 원인은 bash가 마지막(유일한) 명령을 실행할 때 fork 없이 자기 자신을 그 명령으로 `execve()` 치환하는 최적화를 수행하기 때문이다 — `/tmp/raylet`(파일명만 raylet로 바꾼 bash)가 `nc`로 치환되면서 같은 PID가 그대로 유지된다. `tp/sched/sched_process_exec` 훅은 `execve()`가 완료된 *이후*에 발동하므로, 그 시점엔 이미 `comm`이 `raylet`에서 `nc`로 바뀌어 있어 `watched_self[]`(3.7절, v6) 매칭이 실패하고, fork가 없었으니 `ai_worker_lineage`에도 등록되지 않아 두 조건 모두 거짓이 된다 — SHADOW_EXEC/SHADOW_CONNECT 어느 쪽도 이 프로세스를 감시 대상으로 인식하지 못한다. 반면 `kshield_vpatch_lsm`의 `bprm_check_security`는 `execve()` *이전*에 발동하므로 그 시점엔 `comm`이 아직 `raylet`라 같은 `watched_self[]` 검사가 그대로 성공한다 — 같은 판정 로직이 훅의 실행 시점 차이만으로 kprobe 컴포넌트에서만 무력화되는 사례다.
+**발견 경위**: 3.9절의 재시작 핸드오프 재측정 중, `kshield_vpatch`(kprobe) 재현에 파이프 없는 단일 명령(`/tmp/raylet -c "nc -w 2 <IP> 80"`)을 쓰면 공격이 전혀 탐지되지 않는 현상을 우연히 발견하였다. 원인은 bash가 마지막(유일한) 명령을 실행할 때 fork 없이 자기 자신을 그 명령으로 `execve()` 치환하는 최적화를 수행하기 때문이다 — `/tmp/raylet`(파일명만 raylet로 바꾼 bash)가 `nc`로 치환되면서 같은 PID가 그대로 유지된다. `tp/sched/sched_process_exec` 훅은 `execve()`가 완료된 *이후*에 발동하므로, 그 시점엔 이미 `comm`이 `raylet`에서 `nc`로 바뀌어 있어 `watched_self[]`(3.3절) 매칭이 실패하고, fork가 없었으니 `ai_worker_lineage`에도 등록되지 않아 두 조건 모두 거짓이 된다 — SHADOW_EXEC/SHADOW_CONNECT 어느 쪽도 이 프로세스를 감시 대상으로 인식하지 못한다. 반면 `kshield_vpatch_lsm`의 `bprm_check_security`는 `execve()` *이전*에 발동하므로 그 시점엔 `comm`이 아직 `raylet`라 같은 `watched_self[]` 검사가 그대로 성공한다 — 같은 판정 로직이 훅의 실행 시점 차이만으로 kprobe 컴포넌트에서만 무력화되는 사례다.
 
 **수정**: 커널 BPF 프로그램에 새 훅을 하나 추가한다. `tp/syscalls/sys_enter_execve`는 `execve()` 진입 시점(아직 `comm`이 바뀌기 전)에 발동하므로, 이 시점의 `comm`이 `watched_self[]`와 일치하면 실제 exec가 완료되기도 전에 미리 해당 PID를 `ai_worker_lineage`에 등록해 둔다. 이후 exec가 실제로 완료되어 `trace_shadow_exec`/`trace_shadow_connect_v4/v6`가 발동할 때는 이미 `ai_worker_lineage`에 등록된 상태이므로, 그쪽 코드는 전혀 손대지 않고도 정상적으로 탐지한다.
 
@@ -496,7 +480,7 @@ Killed
 $ /tmp/raylet -c "echo benign-job"
 benign-job   (오탐 없이 정상 통과)
 
-[회귀 확인 2: 기존 fork 강제 케이스(3.11절 방식)]
+[회귀 확인 2: 기존 fork 강제 케이스(3.9절 방식)]
 $ /tmp/raylet -c "nc -w 2 203.0.113.1 80 | cat >/dev/null"
 소요시간: 0.007초 (기존과 동일하게 즉시 차단)
 
@@ -511,7 +495,7 @@ SHADOW_EXEC 탐지! parent=raylet(pid=17539) -> child=nc(pid=17540) exec=/usr/bi
 
 ---
 
-### 3.13 v13 — 실제 Ray 클러스터 검증과 IPv4-mapped IPv6 신뢰 우회
+### 3.11 7차 — 실제 Ray 클러스터 검증과 IPv4-mapped IPv6 신뢰 우회
 
 **발견 경위**: 5장 향후 연구에 "실제 Ray 클러스터 환경 검증"을 미해결로 남겨 두었던 것을 이번에 다루었다. mock 서버 대신 실제 Ray 2.52.0을 VM에 설치하고 로컬 클러스터(`ray start --head`)를 띄우려 하자, kShield-VirtualPatch(`kshield_vpatch`)를 켜 둔 상태에서는 클러스터 자체가 기동되지 않았다. 데몬 로그를 확인한 결과, `raylet`(`watched_self[]` 기본값에 포함된 이름) 자신이 GCS 서버로 접속하는 시도가 매번 SHADOW_CONNECT로 탐지되어 SIGKILL당하고 있었다 — 원인은 Ray의 GCS 주소가 loopback(127.0.0.1)이 아니라 노드의 실제 네트워크 인터페이스 IP였기 때문이다. `trusted_dst_ipv4_map`이 기본적으로 비어 있는 상태에서 kShield-VirtualPatch를 재컴파일 없이 그대로 실제 Ray 클러스터에 적용하면, Ray 자신의 정상적인 내부 통신이 공격처럼 보여 클러스터가 아예 뜨지 못한다는 뜻이다. 이는 코드 결함이 아니라 "낯선 목적지는 기본적으로 차단한다"는 설계 원칙이 만들어낸 예상 밖의 부작용이며, 실제 배포 전에는 GCS를 비롯한 노드의 IP를 미리 신뢰 목록에 등록해야 한다는 운영 지침이 필요함을 보여준다.
 
@@ -543,15 +527,15 @@ SHADOW_EXEC 탐지! parent=sh(pid=72968) -> child=nc(pid=72970)
 
 정상 job 5개는 전부 성공(오탐 없음)하였고, 실제 Jobs API로 제출한 악성 job은 실제 Ray 워커 프로세스가 그 entrypoint를 실행하는 순간 SHADOW_EXEC으로 정확히 탐지·차단됨을 확인하였다 — mock 서버가 아닌 진짜 Ray 클러스터의 실제 job 실행 경로에 대한 탐지 검증이 이번에 처음으로 이루어졌다.
 
-**남는 한계**: (1) 순수 IPv6(비-mapped) 목적지용 신뢰 목록은 여전히 없다. (2) 실제 배포 시에는 클러스터의 모든 노드 IP(GCS를 비롯한 각 노드의 내부 통신 주소)를 미리 신뢰 목록에 등록해야 한다는 운영 부담이 새로 확인되었다 — 다중 노드 클러스터에서는 이 목록이 상당히 길어질 수 있으며, 자동화(예: Ray 클러스터 설정에서 노드 IP 목록을 읽어 자동 등록)는 아직 없다. (3) 이번 검증은 단일 노드 클러스터·단일 세션 기준이며, mock 서버 기반 실험(3.7절 v6)에서 우려했던 "actor 기반 실행 등 mock과 다른 job 실행 경로" 가운데 단순 `python3 -c`/서브프로세스 entrypoint만 확인하였다 — Ray actor, `@ray.remote` 클래스, 멀티프로세싱 기반 워크로드는 아직 검증하지 못했다. (4) `kshield_vpatch_lsm`에 대한 실제 Ray 클러스터 검증은 이어서 3.14절(v14)에서 다룬다.
+**남는 한계**: (1) 순수 IPv6(비-mapped) 목적지용 신뢰 목록은 여전히 없다. (2) 실제 배포 시에는 클러스터의 모든 노드 IP(GCS를 비롯한 각 노드의 내부 통신 주소)를 미리 신뢰 목록에 등록해야 한다는 운영 부담이 새로 확인되었다 — 다중 노드 클러스터에서는 이 목록이 상당히 길어질 수 있으며, 자동화(예: Ray 클러스터 설정에서 노드 IP 목록을 읽어 자동 등록)는 아직 없다. (3) 이번 검증은 단일 노드 클러스터·단일 세션 기준이며, mock 서버 기반 실험(3.3절)에서 우려했던 "actor 기반 실행 등 mock과 다른 job 실행 경로" 가운데 단순 `python3 -c`/서브프로세스 entrypoint만 확인하였다 — Ray actor, `@ray.remote` 클래스, 멀티프로세싱 기반 워크로드는 아직 검증하지 못했다. (4) `kshield_vpatch_lsm`에 대한 실제 Ray 클러스터 검증은 이어서 3.12절(8차)에서 다룬다.
 
-### 3.14 v14 — LSM 컴포넌트의 실제 Ray 클러스터 검증과 동일한 IPv4-mapped IPv6 우회
+### 3.12 8차 — LSM 컴포넌트의 실제 Ray 클러스터 검증과 동일한 IPv4-mapped IPv6 우회
 
-**발견 경위**: 3.13절(v13)에서 검증한 것은 kprobe/tracepoint 기반 메인 구현(`kshield_vpatch`)뿐이었다. 이번에는 이미 기동되어 있던 같은 실제 Ray 클러스터(단일 노드, Python 3.11)에 LSM 훅 기반 사전 차단 구현(`kshield_vpatch_lsm`, 3.5절)을 추가로 붙여 검증하였다. 커널이 `CONFIG_BPF_LSM=y`이고 활성 LSM 목록에 이미 `bpf`가 포함되어 있어(사전 확인함), 별도의 부팅 설정 변경 없이 바로 attach할 수 있었다. LSM 프로그램 4개(fork/exit 계보 추적, `bprm_check_security`, `socket_connect`)가 모두 정상 attach되었고, 이미 맺어져 있던 raylet↔GCS 연결은(기존 연결이라 재검사 대상이 아니므로) 영향받지 않았다.
+**발견 경위**: 3.11절(7차)에서 검증한 것은 kprobe/tracepoint 기반 메인 구현(`kshield_vpatch`)뿐이었다. 이번에는 이미 기동되어 있던 같은 실제 Ray 클러스터(단일 노드, Python 3.11)에 LSM 훅 기반 사전 차단 구현(`kshield_vpatch_lsm`, 3.5절)을 추가로 붙여 검증하였다. 커널이 `CONFIG_BPF_LSM=y`이고 활성 LSM 목록에 이미 `bpf`가 포함되어 있어(사전 확인함), 별도의 부팅 설정 변경 없이 바로 attach할 수 있었다. LSM 프로그램 4개(fork/exit 계보 추적, `bprm_check_security`, `socket_connect`)가 모두 정상 attach되었고, 이미 맺어져 있던 raylet↔GCS 연결은(기존 연결이라 재검사 대상이 아니므로) 영향받지 않았다.
 
-문제는 실제 Jobs API로 job을 제출해 Ray가 새 워커 프로세스를 fork하자 나타났다 — 새로 뜬 워커(`python3.11`/`event_engine`, 부모 `raylet`)가 GCS로 연결을 시도할 때마다 `LSM_CONNECT_BLOCK`이 즉시 발동해 `connect()` 자체가 `-EPERM`으로 실패했다. `trusted_dst_ipv4_map`에 노드 IP를 이미 등록해 두었음에도(v13에서 검증된 것과 동일한 절차) 계속 차단되었으며, 로그에는 목적지가 `0.0.0.0:6379`로 찍혔다 — v13에서 확인한 것과 정확히 같은 신호였다. 즉 `kshield_lsm_socket_connect`의 AF_INET6 분기에는 v13에서 고친 IPv4-mapped IPv6 판정 로직이 애초에 없었고(별도의 독립된 BPF 오브젝트라 코드를 공유하지 않으므로), 같은 근본 원인(Ray의 gRPC 클라이언트가 신뢰된 목적지로도 `::ffff:a.b.c.d` 형태로 접속을 시도함)이 서로 다른 파일에 반복 작성된 동일한 코드 패턴 때문에 독립적으로 재현된 것이었다. v13과의 차이는, 이번엔 raylet 자기 자신이 아니라 매번 새로 fork되는 워커들이 걸렸다는 점과, SIGKILL이 아니라 매 시도가 즉시 `-EPERM`으로 막혀 제출한 job 6개(정상 5 + 악성 1)가 전부 PENDING에서 진행되지 못했다는 점이다. `gcs_server`/`raylet`/`dashboard_agent`는 기존 연결이 끊기지 않았으므로 클러스터 자체는 죽지 않았다.
+문제는 실제 Jobs API로 job을 제출해 Ray가 새 워커 프로세스를 fork하자 나타났다 — 새로 뜬 워커(`python3.11`/`event_engine`, 부모 `raylet`)가 GCS로 연결을 시도할 때마다 `LSM_CONNECT_BLOCK`이 즉시 발동해 `connect()` 자체가 `-EPERM`으로 실패했다. `trusted_dst_ipv4_map`에 노드 IP를 이미 등록해 두었음에도(7차에서 검증된 것과 동일한 절차) 계속 차단되었으며, 로그에는 목적지가 `0.0.0.0:6379`로 찍혔다 — 7차에서 확인한 것과 정확히 같은 신호였다. 즉 `kshield_lsm_socket_connect`의 AF_INET6 분기에는 7차에서 고친 IPv4-mapped IPv6 판정 로직이 애초에 없었고(별도의 독립된 BPF 오브젝트라 코드를 공유하지 않으므로), 같은 근본 원인(Ray의 gRPC 클라이언트가 신뢰된 목적지로도 `::ffff:a.b.c.d` 형태로 접속을 시도함)이 서로 다른 파일에 반복 작성된 동일한 코드 패턴 때문에 독립적으로 재현된 것이었다. 7차와의 차이는, 이번엔 raylet 자기 자신이 아니라 매번 새로 fork되는 워커들이 걸렸다는 점과, SIGKILL이 아니라 매 시도가 즉시 `-EPERM`으로 막혀 제출한 job 6개(정상 5 + 악성 1)가 전부 PENDING에서 진행되지 못했다는 점이다. `gcs_server`/`raylet`/`dashboard_agent`는 기존 연결이 끊기지 않았으므로 클러스터 자체는 죽지 않았다.
 
-**수정**: `kshield_lsm_socket_connect`의 AF_INET6 분기에 `trace_shadow_connect_v6`(v13)와 동일한 로직 — IPv4-mapped 대역(`::ffff:0:0/96`) 판별 후 뒤 4바이트의 실제 IPv4 주소를 기존 `trusted_dst_ipv4_map`으로 재판정 — 을 그대로 이식하였다. 별도의 IPv6 전용 신뢰 맵을 새로 만들지 않고 기존 로직을 재사용한 것도 v13과 동일하다.
+**수정**: `kshield_lsm_socket_connect`의 AF_INET6 분기에 `trace_shadow_connect_v6`(7차)와 동일한 로직 — IPv4-mapped 대역(`::ffff:0:0/96`) 판별 후 뒤 4바이트의 실제 IPv4 주소를 기존 `trusted_dst_ipv4_map`으로 재판정 — 을 그대로 이식하였다. 별도의 IPv6 전용 신뢰 맵을 새로 만들지 않고 기존 로직을 재사용한 것도 7차와 동일하다.
 
 **VM 실측 결과**: 재빌드·재기동 후 같은 테스트를 반복하였다.
 
@@ -571,9 +555,9 @@ LSM_EXEC_BLOCK 탐지! proc=sh parent=sh exec=/bin/nc => execve() -EPERM
   driver 로그: "/bin/sh: 1: nc: Operation not permitted"
 ```
 
-수정 전에는 신규 워커의 GCS 연결이 매번 막혀 job 6개가 전부 PENDING에 정체되었고, 수정 후에는 정상 job 5개가 전부 SUCCEEDED로 끝까지 완료되었으며 악성 job은 `execve()` 자체가 `-EPERM`으로 막혀 `nc`가 단 한 줄도 실행되지 못한 채 exit code 126으로 실패하였다 — v13의 SHADOW_EXEC(사후 SIGKILL, exit 137)과 달리, 이번엔 사전 차단이라는 LSM 컴포넌트 고유의 성질이 실제 Jobs API 경로에서도 그대로 확인되었다. 클러스터는 테스트 전 과정에서 한 번도 재시작되지 않고 계속 살아있었다.
+수정 전에는 신규 워커의 GCS 연결이 매번 막혀 job 6개가 전부 PENDING에 정체되었고, 수정 후에는 정상 job 5개가 전부 SUCCEEDED로 끝까지 완료되었으며 악성 job은 `execve()` 자체가 `-EPERM`으로 막혀 `nc`가 단 한 줄도 실행되지 못한 채 exit code 126으로 실패하였다 — 7차의 SHADOW_EXEC(사후 SIGKILL, exit 137)과 달리, 이번엔 사전 차단이라는 LSM 컴포넌트 고유의 성질이 실제 Jobs API 경로에서도 그대로 확인되었다. 클러스터는 테스트 전 과정에서 한 번도 재시작되지 않고 계속 살아있었다.
 
-**남는 한계**: (1) 3.13절과 동일하게 순수 IPv6(비-mapped) 목적지용 신뢰 목록은 여전히 없다 — 이번 수정도 IPv4-mapped 경로만 해소한다. (2) `enforce_mode`를 audit-only(0)로 둔 상태에서의 실제 클러스터 동작은 검증하지 않았다. (3) 이번 검증도 3.13절과 동일하게 단순 서브프로세스 entrypoint(`python3 -c`, `nc`)에 국한되며, actor·멀티프로세싱 기반 job 실행 경로는 아직 다루지 않았다. (4) 동일한 취약 패턴(IPv4-mapped IPv6 미처리)이 서로 다른 두 개의 독립 BPF 오브젝트(`kshield_vpatch.bpf.c`, `kshield_vpatch_lsm.bpf.c`)에 각각 존재했다가 순서대로 발견·수정되었다는 사실 자체가, 두 컴포넌트가 유사한 판정 로직을 각자 유지하는 데서 오는 코드 중복·유지보수 위험을 보여준다 — 향후 공통 판정 로직을 공유 헤더/인라인 함수로 통합하는 리팩터링이 필요할 수 있다.
+**남는 한계**: (1) 3.11절과 동일하게 순수 IPv6(비-mapped) 목적지용 신뢰 목록은 여전히 없다 — 이번 수정도 IPv4-mapped 경로만 해소한다. (2) `enforce_mode`를 audit-only(0)로 둔 상태에서의 실제 클러스터 동작은 검증하지 않았다. (3) 이번 검증도 3.11절과 동일하게 단순 서브프로세스 entrypoint(`python3 -c`, `nc`)에 국한되며, actor·멀티프로세싱 기반 job 실행 경로는 아직 다루지 않았다. (4) 동일한 취약 패턴(IPv4-mapped IPv6 미처리)이 서로 다른 두 개의 독립 BPF 오브젝트(`kshield_vpatch.bpf.c`, `kshield_vpatch_lsm.bpf.c`)에 각각 존재했다가 순서대로 발견·수정되었다는 사실 자체가, 두 컴포넌트가 유사한 판정 로직을 각자 유지하는 데서 오는 코드 중복·유지보수 위험을 보여준다 — 향후 공통 판정 로직을 공유 헤더/인라인 함수로 통합하는 리팩터링이 필요할 수 있다.
 
 ---
 
@@ -617,7 +601,7 @@ LSM_EXEC_BLOCK 탐지! proc=sh parent=sh exec=/bin/nc => execve() -EPERM
 
 trace 버퍼 분석 결과, 실행 체인은 다음과 같이 진행되었다: `python3(워커) → fork → sh` (계보 편입) → `sh` exec (감시 대상이지만 `suspicious_bins[]`에 없어 통과) → `sh → fork → curl` (계보 편입, 2단계 추적 성공) → `curl` exec (계보 소속 + `suspicious_bins[]` 일치 → SIGKILL). 파이프의 두 번째 `sh`(`curl ... | sh`)도 동일하게 계보에 편입되었으나 `suspicious_bins[]`에 없어 오탐 없이 통과하였다.
 
-**SHADOW_CONNECT(v3) 우회 시나리오 재현 결과**: SHADOW_EXEC(v2)이 실행 파일 이름 블록리스트에 의존한다는 한계를 검증하기 위해, `suspicious_bins[]`에 없는 방식으로 공격을 재현하였다. bash의 내장 TCP 리다이렉션 기능(`bash -c 'exec 3<>/dev/tcp/1.1.1.1/80; echo leaked >&3'`)은 curl/nc 같은 별도 바이너리를 실행하지 않으므로 SHADOW_EXEC로는 탐지되지 않는다. SHADOW_CONNECT는 이 시도를 `tcp_v4_connect` 진입 시점에 정확히 포착하였다.
+**SHADOW_CONNECT(v3) 우회 시나리오 재현 결과**: SHADOW_EXEC이 실행 파일 이름 블록리스트에 의존한다는 한계를 검증하기 위해, `suspicious_bins[]`에 없는 방식으로 공격을 재현하였다. bash의 내장 TCP 리다이렉션 기능(`bash -c 'exec 3<>/dev/tcp/1.1.1.1/80; echo leaked >&3'`)은 curl/nc 같은 별도 바이너리를 실행하지 않으므로 SHADOW_EXEC로는 탐지되지 않는다. SHADOW_CONNECT는 이 시도를 `tcp_v4_connect` 진입 시점에 정확히 포착하였다.
 
 ```
 [13:36:02] SHADOW_CONNECT 탐지! parent=sh -> proc=bash(pid=118590) dst=1.1.1.1:80 => SIGKILL 전송
@@ -625,7 +609,7 @@ trace 버퍼 분석 결과, 실행 체인은 다음과 같이 진행되었다: `
 
 동일 조건에서 정상 job(`echo benign-job`)은 SHADOW_EXEC·SHADOW_CONNECT 어느 쪽도 발생시키지 않고 정상 처리되어, 새 탐지 계층 추가가 기존 정상 경로에 오탐을 유발하지 않음을 확인하였다. 개발 과정에서 `parent_comm` 필드가 로그에 빈 값으로 찍히는 버그(공통 헬퍼 함수에 배열 대신 포인터를 넘겨 `BPF_CORE_READ_STR_INTO`의 목적지 크기 추론이 1바이트로 축소된 문제)를 실측으로 발견하여 수정하였다.
 
-**N=30 반복 탐지율 측정**: 위 결과는 원래 단일 실행 기반 정성적 확인에 그쳤다. 이를 보완하기 위해 SHADOW_EXEC(`nc`를 감시 대상 프로세스명(`raylet`로 위장한 bash)이 self-exec 치환으로 직접 실행)과 SHADOW_CONNECT(`curl`을 동일하게 self-exec 치환으로 실행해 신뢰 안 된 목적지로 연결 시도)를 각각 30회씩, 그리고 정상 job(`echo`)을 30회 반복 재현하였다. SHADOW_EXEC 30/30, SHADOW_CONNECT 30/30 전부 탐지·차단되었고, 정상 job도 30/30 오탐 없이 통과하였다 — 실패 사례는 없었다. 소요시간(공격 명령 실행부터 프로세스 종료까지) 분포는 SHADOW_EXEC가 평균 5.01ms(표준편차 0.33ms, 최소 4.63ms~최대 5.88ms), SHADOW_CONNECT가 평균 12.09ms(표준편차 0.73ms, 최소 11.18ms~최대 14.69ms)로, SHADOW_CONNECT가 약 2.4배 더 걸렸다 — SHADOW_EXEC은 `execve()` 직후 트레이스포인트에서 곧바로 판정·SIGKILL이 이루어지는 반면, SHADOW_CONNECT는 `curl`이 URL 파싱·소켓 생성 등을 거쳐 실제로 `connect()`를 호출하는 시점까지 진행된 뒤에야 판정이 이루어지므로, 그 사이 단계가 소요시간에 그대로 더해지기 때문으로 해석된다. 이 재현은 v12(3.12절)에서 고친 self-exec 치환 케이스도 N=30 규모로 재검증한 것을 겸한다.
+**N=30 반복 탐지율 측정**: 위 결과는 원래 단일 실행 기반 정성적 확인에 그쳤다. 이를 보완하기 위해 SHADOW_EXEC(`nc`를 감시 대상 프로세스명(`raylet`로 위장한 bash)이 self-exec 치환으로 직접 실행)과 SHADOW_CONNECT(`curl`을 동일하게 self-exec 치환으로 실행해 신뢰 안 된 목적지로 연결 시도)를 각각 30회씩, 그리고 정상 job(`echo`)을 30회 반복 재현하였다. SHADOW_EXEC 30/30, SHADOW_CONNECT 30/30 전부 탐지·차단되었고, 정상 job도 30/30 오탐 없이 통과하였다 — 실패 사례는 없었다. 소요시간(공격 명령 실행부터 프로세스 종료까지) 분포는 SHADOW_EXEC가 평균 5.01ms(표준편차 0.33ms, 최소 4.63ms~최대 5.88ms), SHADOW_CONNECT가 평균 12.09ms(표준편차 0.73ms, 최소 11.18ms~최대 14.69ms)로, SHADOW_CONNECT가 약 2.4배 더 걸렸다 — SHADOW_EXEC은 `execve()` 직후 트레이스포인트에서 곧바로 판정·SIGKILL이 이루어지는 반면, SHADOW_CONNECT는 `curl`이 URL 파싱·소켓 생성 등을 거쳐 실제로 `connect()`를 호출하는 시점까지 진행된 뒤에야 판정이 이루어지므로, 그 사이 단계가 소요시간에 그대로 더해지기 때문으로 해석된다. 이 재현은 6차(3.10절)에서 고친 self-exec 치환 케이스도 N=30 규모로 재검증한 것을 겸한다.
 
 **한계**: 위 N=30 측정은 단일 세션·단일 VM 기준이며, `kshield_vpatch_lsm`(3.5절)에 대해서는 아직 동일한 반복 측정을 수행하지 않았다. 또한 여기서 잰 소요시간은 유저스페이스에서 관측한 명령 실행~종료까지의 벽시계 시간이며, SIGKILL 신호 자체가 커널 내부에서 전달되는 마이크로초 단위 정밀 지연시간(`bpf_ktime_get_ns()` 기반)은 아직 별도로 계측하지 않았다. SHADOW_CONNECT의 나머지 한계(기존 연결 재사용, 허용 포트 위 터널링, 네트워크 불필요 공격)는 3.3절에 기술하였다.
 
@@ -826,7 +810,7 @@ Falco 쪽 결과는 애초 세운 가설("룰을 걷어내면 가벼워질 것")
 
 ### 4.6 다른 CVE·프레임워크로의 일반화 검증 (예비 실험)
 
-3.1절은 "ShadowRay 외 다른 CVE에 대한 일반화된 방어는 본 논문의 범위 밖"이라고 명시하였다. SHADOW_EXEC/SHADOW_CONNECT의 판정 로직 자체는 "어떻게 코드 실행 권한을 얻었는가"가 아니라 "그 권한으로 무엇을 하려 하는가"만 보므로 원리적으로는 다른 취약점에도 적용될 수 있어야 하지만, 지금까지는 실측으로 확인한 적이 없었다. 이 절은 그 공백을 메우기 위해, 커널 코드(`kshield_vpatch.bpf.c`)를 **한 줄도 수정하지 않고** `kshield_ctl parent-add`(3.9~3.10절의 런타임 제어 계층)만으로 다른 프레임워크의 다른 CVE도 막히는지 확인한 예비 실험이다.
+3.1절은 "ShadowRay 외 다른 CVE에 대한 일반화된 방어는 본 논문의 범위 밖"이라고 명시하였다. SHADOW_EXEC/SHADOW_CONNECT의 판정 로직 자체는 "어떻게 코드 실행 권한을 얻었는가"가 아니라 "그 권한으로 무엇을 하려 하는가"만 보므로 원리적으로는 다른 취약점에도 적용될 수 있어야 하지만, 지금까지는 실측으로 확인한 적이 없었다. 이 절은 그 공백을 메우기 위해, 커널 코드(`kshield_vpatch.bpf.c`)를 **한 줄도 수정하지 않고** `kshield_ctl parent-add`(3.7~3.8절의 런타임 제어 계층)만으로 다른 프레임워크의 다른 CVE도 막히는지 확인한 예비 실험이다.
 
 **대상 선정**: ShadowRay와의 구조적 유사성과 노출 조건이 서로 다른 일곱 CVE를 의도적으로 골랐다.
 
@@ -888,47 +872,43 @@ VM 실측 결과, python3(워커)→sh→curl로 이어지는 2단계 공격 체
 
 Falco·Tetragon에 같은 판정을 이식해 같은 VM·세션에서 비교한 결과(4.5절), 사전에 고정한 ±2% 마진 안에서 동등성이 입증된 것은 kShield-VirtualPatch뿐이었다. Falco와 Tetragon은 두 워크로드 모두에서 마진을 벗어나는 유의한 오버헤드를 보였으며, 특히 Tetragon은 fork 집약적 워크로드에서 처리량이 −7.63%까지 벌어졌다. 다만 이는 "범용 도구가 열등하다"가 아니라, 두 도구가 이번 판정 하나보다 훨씬 넓은 기본 관측 범위를 상시 유지하는 데서 오는 비용으로 해석해야 한다 — kShield-VirtualPatch가 가벼운 것은 그 범용성을 포기한 대가다.
 
-개발 과정에서 열세 차례의 설계 반복이 있었다. 첫째, "직속 부모만 확인"하는 초기 설계(v1)가 다단계 공격 체인을 놓치고 정상 job도 오탐하는 문제를 실측으로 발견하여 프로세스 계보(lineage) 추적 방식(v2)으로 재설계하였다. 둘째, v2의 실행 파일 이름 블록리스트(`suspicious_bins[]`)가 bash 내장 기능 같은 우회에 취약함을 확인하여, 연결 시도 자체를 감시하는 SHADOW_CONNECT(v3)를 추가하였다. 셋째, 비동기 SIGKILL의 잔여 한계(3.3절)를 해소하기 위해 LSM 훅 기반 동기적 사전 차단(3.5절)을 추가로 구현·검증하는 과정에서, `suspicious_bins[]`가 `/usr/bin/curl`은 막으면서 셸의 `$PATH` 재탐색이 시도하는 동일 파일의 다른 경로 문자열(`/bin/curl`)은 놓치는 버그를 발견하였다 — 이는 이미 "검증됨"으로 문서화했던 v3에도 동일하게 존재하던 누락이었다. 이 경험들은 행위 기반 탐지 메커니즘을 설계할 때 (1) 실행 체인의 깊이, (2) 감시 신호가 "특정 도구의 사용"이 아니라 "행위의 본질적 불변량"에 기반해야 함, 그리고 (3) 경로 기반 블록리스트는 같은 대상을 가리키는 모든 문자열 별칭(alias)을 빠짐없이 열거해야 함을 반드시 고려해야 함을 보여준다. 다만 SHADOW_CONNECT조차도 완전한 차단은 아니며, 이미 열려 있는 연결의 재사용, 허용된 프로토콜 위의 터널링, 네트워크가 불필요한 로컬 전용 공격에는 대응하지 못한다 — 이는 특정 구현의 결함이라기보다 행위 기반 탐지 일반의 본질적 한계에 가깝다.
+개발 과정에서 기본 탐지 구조를 확립하는 과정과, 그 이후 8차례의 설계 개선이 있었다. 기본 구조(3.3~3.5절)는 "직속 부모만 확인"하는 초기 설계가 다단계 공격 체인을 놓치고 정상 job도 오탐하는 문제를 실측으로 발견하여 프로세스 계보(lineage) 추적 방식으로 재설계하는 데서 시작하였다. 이어서 실행 파일 이름 블록리스트(`suspicious_bins[]`)가 bash 내장 기능 같은 우회에 취약함을 확인하여, 연결 시도 자체를 감시하는 SHADOW_CONNECT를 추가하였다. 비동기 SIGKILL의 잔여 한계를 해소하기 위해 LSM 훅 기반 동기적 사전 차단을 추가로 구현·검증하는 과정에서는, `suspicious_bins[]`가 `/usr/bin/curl`은 막으면서 셸의 `$PATH` 재탐색이 시도하는 동일 파일의 다른 경로 문자열(`/bin/curl`)은 놓치는 버그를 발견하였다 — 이는 이미 "검증됨"으로 문서화했던 초기 구현에도 동일하게 존재하던 누락이었다. curl/wget처럼 모델·데이터셋 다운로드에도 쓰이는 이중 용도 도구를 실행 파일 이름만으로 즉시 차단하면 정당한 사용까지 오탐 처리되는 문제도 발견하여 판단을 목적지 인지 계층(SHADOW_CONNECT/LSM `socket_connect`)에 넘기도록 재설계하고, WAF 가상 패치의 표준 운영 방식(2.2절)을 지원하는 `enforce_mode`(audit-only/enforce) 런타임 토글을 추가하였다. 마지막으로 계보 판정 로직이 "감시 대상 프로세스의 자손"만 커버하고 감시 대상 프로세스 자신의 직접 행위는 구조적으로 놓친다는 공백을 발견하여, `watched_self[]`라는 별도의 좁은 목록으로 자기 자신의 comm도 확인하도록 보강하였다. 이 경험들은 행위 기반 탐지 메커니즘을 설계할 때 (1) 실행 체인의 깊이, (2) 감시 신호가 "특정 도구의 사용"이 아니라 "행위의 본질적 불변량"에 기반해야 함(따라서 "누구의 자손인가"뿐 아니라 "나 자신이 감시 대상인가"까지 함께 물어야 계보 판정이 완전함), 그리고 (3) 경로 기반 블록리스트는 같은 대상을 가리키는 모든 문자열 별칭(alias)을 빠짐없이 열거해야 함을 반드시 고려해야 함을 보여준다. 다만 SHADOW_CONNECT조차도 완전한 차단은 아니며, 이미 열려 있는 연결의 재사용, 허용된 프로토콜 위의 터널링, 네트워크가 불필요한 로컬 전용 공격에는 대응하지 못한다 — 이는 특정 구현의 결함이라기보다 행위 기반 탐지 일반의 본질적 한계에 가깝다.
 
-넷째, SHADOW_EXEC이 "특정 도구의 사용" 자체를 이상 행위로 간주한다는 (2)의 원칙을 curl/wget에는 일관되게 적용하지 못했음을 뒤늦게 재검토하였다(3.6절, v4) — curl/wget은 모델·데이터셋 다운로드에도 쓰이는 이중 용도 도구라, 목적지와 무관한 즉시 차단은 정당한 사용까지 오탐으로 죽인다. 판단을 목적지 인지 계층(SHADOW_CONNECT)에 넘기도록 재설계하고 VM에서 신뢰/비신뢰 목적지 양쪽을 재검증하였다. 아울러 신규 룰을 먼저 감사(audit-only)로 배포한 뒤 오탐을 관찰하고 차단으로 전환하는, WAF 가상 패치의 표준 운영 방식(2.2절)을 지원하는 `enforce_mode` 런타임 토글을 추가하였다(v5).
+이 기본 구조가 자리잡은 뒤로도 설계는 8차례 더 개선되었다([표 1], 3.6~3.12절). 첫째(1차), 실험이 아닌 기획 관점에서 배포 시나리오를 재검토하는 과정에서, `ai_worker_lineage` 맵이 fork 훅에 의해서만 채워진다는 설계가 "데몬이 클러스터보다 나중에 뜬다"는 상황을 전혀 고려하지 않았음을 발견하였다(3.6절) — 데몬이 이미 실행 중인 워커 뒤에 나중에 붙거나(최초 기동) 재시작되면, 그 시점 이전에 fork가 끝난 자손 프로세스들은 스스로 다시 fork하기 전까지 계보에서 완전히 누락된다. 커널 BPF 프로그램은 그대로 두고, 유저스페이스 로더가 기동 시 `/proc`을 스캔해 이미 떠 있는 프로세스들의 계보를 동일한 맵에 직접 채워 넣는 방식으로 해소하였으며, 직속 부모 검사만으로는 절대 잡을 수 없는 손자뻘(2단계) 프로세스 체인으로 VM에서 재현·검증하였다. 이 발견은 탐지 로직의 정확성뿐 아니라 "데몬의 생애주기(기동·재시작 시점)가 클러스터의 생애주기와 어떻게 어긋날 수 있는가"라는, 실험만으로는 드러나지 않는 배포 설계 차원의 질문이 별도로 필요함을 보여준다.
 
-다섯째, 제출 전 자체 검토 과정에서 계보 판정 로직이 "감시 대상 프로세스의 자손"만 커버하고 감시 대상 프로세스 자신의 직접 행위는 구조적으로 놓친다는 공백을 발견하였다(3.7절, v6) — 지금까지의 모든 실험이 mock 서버의 서브프로세스 실행 방식 때문에 이 경로를 한 번도 노출하지 않았던, 실험 설계 자체의 사각지대였다. `watched_self[]`라는 별도의 좁은 목록으로 자기 자신의 comm도 확인하도록 수정하고 VM에서 검증하였다. 이 발견은 (2)의 원칙("특정 도구의 사용"이 아닌 "행위의 본질적 불변량"에 기반)이 계보 판정 로직 자체에도 적용되어야 함을 보여준다 — "누구의 자손인가"뿐 아니라 "나 자신이 감시 대상인가"까지 함께 물어야 완전하다.
+둘째(2차/3차), 지금까지의 재검토가 탐지 로직 자체의 정확성에 집중되어 있었다면, 이번에는 "탐지가 정확해도 운영팀이 실제로 도입하려 하지 않으면 소용없다"는 실무 도입 관점의 지적을 다루었다(3.7절) — 신뢰 목적지 IP가 rodata에 고정되어 재컴파일 없이는 갱신할 수 없는 점, 탐지 이벤트가 기존 SIEM 파이프라인과 단절되어 있는 점, 오탐 시 GPU 비용이 큰 데도 사용자 단위 예외가 불가능한 점을 각각 BPF map 기반 런타임 제어 계층(`kshield_ctl`), syslog/JSON 연동, UID 단위 감시 예외로 해소하고, 신뢰 IP·예외 UID 등록·해제가 데몬 재시작 없이 즉시 반영됨을 VM에서 검증하였다. 이 발견은 앞선 원칙들이 탐지 로직뿐 아니라 그 탐지 로직을 둘러싼 운영 인터페이스에도 적용되어야 함을 보여준다 — 아무리 정확한 탐지라도 재컴파일이 필요하거나 기존 운영 도구와 단절되어 있으면 실제 배포 문턱을 넘지 못한다.
 
-여섯째, 실험이 아닌 기획 관점에서 배포 시나리오를 재검토하는 과정에서, `ai_worker_lineage` 맵이 fork 훅에 의해서만 채워진다는 설계가 "데몬이 클러스터보다 나중에 뜬다"는 상황을 전혀 고려하지 않았음을 발견하였다(3.8절, v7) — 데몬이 이미 실행 중인 워커 뒤에 나중에 붙거나(최초 기동) 재시작되면, 그 시점 이전에 fork가 끝난 자손 프로세스들은 스스로 다시 fork하기 전까지 계보에서 완전히 누락된다. 커널 BPF 프로그램은 그대로 두고, 유저스페이스 로더가 기동 시 `/proc`을 스캔해 이미 떠 있는 프로세스들의 계보를 동일한 맵에 직접 채워 넣는 방식으로 해소하였으며, 직속 부모 검사만으로는 절대 잡을 수 없는 손자뻘(2단계) 프로세스 체인으로 VM에서 재현·검증하였다. 이 발견은 탐지 로직의 정확성뿐 아니라 "데몬의 생애주기(기동·재시작 시점)가 클러스터의 생애주기와 어떻게 어긋날 수 있는가"라는, 실험만으로는 드러나지 않는 배포 설계 차원의 질문이 별도로 필요함을 보여준다.
+셋째(4차), 둘째 개선이 신뢰 목적지 IP 하나에만 런타임화를 적용했다는 점을 다시 짚어, 같은 논리가 `watched_parents[]`/`watched_self[]`/`suspicious_bins[]`에는 왜 적용되지 않았는지 재검토하였다(3.8절) — "IP만큼 자주 안 바뀐다"는 판단이 실무적으로는 근거가 약하다는 결론에 이르러, 나머지 세 배열도 동일한 BPF map 방식으로 전환하였다. 아울러 "예외 처리는 UID 단위까지만 가능하다"는 한계도, 원래 지적("유저 또는 네임스페이스")의 절반만 해소한 상태였음을 재확인하여 cgroup 단위 예외(`exempt_cgroups_map`)를 추가하였다 — 다만 진짜 쿠버네티스 네임스페이스는 커널이 관측할 수 있는 개념이 아니므로, "네임스페이스 인지"라고 과장하지 않고 cgroup(≈컨테이너/파드) 단위의 근사치임을 분명히 하였다. `parent-add/del`·`bin-add/del`·`self-add/del` 세 쌍 모두 재시작 없이 즉시 반영됨을 VM에서 검증하였으며, `cgroup-exempt-*`는 코드 구현은 완료했으나 이번 라운드에서 VM 검증까지는 하지 못하고 향후 과제로 남겼다. 이 발견은 "실무 도입 장벽"이라는 하나의 지적이라도 그 안에 여러 하위 항목이 섞여 있을 수 있어, 일부만 해소하고 멈추면 재검토 없이는 그 사실 자체를 잊기 쉽다는 점을 보여준다.
 
-일곱째, 지금까지의 재검토가 탐지 로직 자체의 정확성에 집중되어 있었다면, 이번에는 "탐지가 정확해도 운영팀이 실제로 도입하려 하지 않으면 소용없다"는 실무 도입 관점의 지적을 다루었다(3.9절, v8/v9) — 신뢰 목적지 IP가 rodata에 고정되어 재컴파일 없이는 갱신할 수 없는 점, 탐지 이벤트가 기존 SIEM 파이프라인과 단절되어 있는 점, 오탐 시 GPU 비용이 큰 데도 사용자 단위 예외가 불가능한 점을 각각 BPF map 기반 런타임 제어 계층(`kshield_ctl`), syslog/JSON 연동, UID 단위 감시 예외로 해소하고, 신뢰 IP·예외 UID 등록·해제가 데몬 재시작 없이 즉시 반영됨을 VM에서 검증하였다. 이 발견은 (1)~(3)의 원칙이 탐지 로직뿐 아니라 그 탐지 로직을 둘러싼 운영 인터페이스에도 적용되어야 함을 보여준다 — 아무리 정확한 탐지라도 재컴파일이 필요하거나 기존 운영 도구와 단절되어 있으면 실제 배포 문턱을 넘지 못한다.
+넷째(5차), 지금까지의 재검토가 탐지 로직 자체나 그 로직을 둘러싼 운영 인터페이스에 집중되어 있었다면, 이번에는 "탐지 로직이 정확해도 그것을 커널에 붙여 두는 메커니즘 자체가 데몬의 비정상 종료에 강건한가"라는 새로운 축의 질문을 다루었다(3.9절) — Falco·Tetragon과 데몬을 `kill -9`로 강제 종료했을 때의 동작을 대조하다, kShield-VirtualPatch는 BPF 맵만 핀해 두었을 뿐 실제 판정·SIGKILL을 수행하는 프로그램의 부착(link) 자체는 핀하지 않아 데몬이 죽는 순간 커널의 탐지 로직까지 통째로 사라지는 fail-open임을 발견하였다(Tetragon은 데몬이 완전히 죽어 있는 상태에서도 커널 쪽 차단이 계속됨을 확인). 다섯 개 프로그램의 link를 전부 `bpffs`에 핀하고, 재시작 시 새 attach를 먼저 만든 뒤에야 옛 핀을 지우는 순서로 보호 공백 없이 교체되도록, 반대로 SIGINT/SIGTERM 같은 의도된 종료에서는 명시적으로 unpin해 실제로 꺼지도록 수정하였다. 수정 후 `kill -9`에도 5개 프로그램이 전부 잔존하며 공격이 여전히 차단됨을, SIGTERM으로는 핀이 실제로 사라짐을 VM에서 각각 확인하였다. 같은 문제가 SIGKILL이 아닌 동기적 사전 차단(LSM) 컴포넌트(`kshield_vpatch_lsm`, 3.5절)에도 있는지 이어서 확인한 결과 동일한 fail-open이 재현되었고, 같은 방식으로 고쳐 같은 방법으로 재검증하였다. 이 발견은 탐지 로직의 "정확성"과, 그 정확한 로직을 실제로 커널에 유지시키는 메커니즘의 "강건성"은 완전히 별개의 축이며 따로 검증하지 않으면 놓치기 쉽다는 점을 보여준다 — 그리고 그 강건성 문제는 한 컴포넌트에 국한되지 않고, 같은 아키텍처 패턴(맵만 핀하고 attach는 안 핀하는)을 공유하는 다른 컴포넌트에도 그대로 옮겨갈 수 있다는 점도 함께 보여준다.
 
-여덟째, 일곱째 개선이 신뢰 목적지 IP 하나에만 런타임화를 적용했다는 점을 다시 짚어, 같은 논리가 `watched_parents[]`/`watched_self[]`/`suspicious_bins[]`에는 왜 적용되지 않았는지 재검토하였다(3.10절, v10) — "IP만큼 자주 안 바뀐다"는 판단이 실무적으로는 근거가 약하다는 결론에 이르러, 나머지 세 배열도 동일한 BPF map 방식으로 전환하였다. 아울러 "예외 처리는 UID 단위까지만 가능하다"는 한계도, 원래 지적("유저 또는 네임스페이스")의 절반만 해소한 상태였음을 재확인하여 cgroup 단위 예외(`exempt_cgroups_map`)를 추가하였다 — 다만 진짜 쿠버네티스 네임스페이스는 커널이 관측할 수 있는 개념이 아니므로, "네임스페이스 인지"라고 과장하지 않고 cgroup(≈컨테이너/파드) 단위의 근사치임을 분명히 하였다. `parent-add/del`·`bin-add/del`·`self-add/del` 세 쌍 모두 재시작 없이 즉시 반영됨을 VM에서 검증하였으며, `cgroup-exempt-*`는 코드 구현은 완료했으나 이번 라운드에서 VM 검증까지는 하지 못하고 향후 과제로 남겼다. 이 발견은 "실무 도입 장벽"이라는 하나의 지적이라도 그 안에 여러 하위 항목이 섞여 있을 수 있어, 일부만 해소하고 멈추면 재검토 없이는 그 사실 자체를 잊기 쉽다는 점을 보여준다.
+다섯째(6차), 넷째의 재시작 핸드오프 재측정 과정에서, 이번에는 그와 무관한 별개의 탐지 공백을 우연히 발견하였다(3.10절) — kprobe 기반 컴포넌트의 `watched_self[]`(3.3절) 검사가 fork 없이 자기 자신을 다른 바이너리로 치환하는 self-exec 케이스(bash의 단일 명령 exec 치환 최적화)를 놓친다는 것이다. 원인은 `tp/sched/sched_process_exec` 훅이 `execve()` 완료 *이후*에 발동해 그 시점엔 이미 `comm`이 바뀌어 있기 때문이며, 같은 검사가 `execve()` *이전*에 발동하는 LSM 컴포넌트에서는 문제없이 통과한다. `execve()` 진입 시점에 훅을 하나 추가해 `comm`이 바뀌기 전에 미리 계보에 등록해 두는 방식으로 해소하였고, 기존 exec/connect 판정 코드는 전혀 손대지 않았다. 이 발견은 넷째와 마찬가지로 "같은 판정 로직도 훅이 커널 실행 흐름의 어느 지점에 걸리는가에 따라 결과가 달라질 수 있다"는, 개별 컴포넌트 검증만으로는 드러나지 않는 교차 컴포넌트 비교의 가치를 다시 한번 보여준다 — 두 차례(넷째, 다섯째) 모두 서로 다른 컴포넌트를 나란히 비교하는 과정에서만 드러난 문제였다.
 
-아홉째, 지금까지의 재검토가 탐지 로직 자체나 그 로직을 둘러싼 운영 인터페이스에 집중되어 있었다면, 이번에는 "탐지 로직이 정확해도 그것을 커널에 붙여 두는 메커니즘 자체가 데몬의 비정상 종료에 강건한가"라는 새로운 축의 질문을 다루었다(3.11절, v11) — Falco·Tetragon과 데몬을 `kill -9`로 강제 종료했을 때의 동작을 대조하다, kShield-VirtualPatch는 BPF 맵만 핀해 두었을 뿐 실제 판정·SIGKILL을 수행하는 프로그램의 부착(link) 자체는 핀하지 않아 데몬이 죽는 순간 커널의 탐지 로직까지 통째로 사라지는 fail-open임을 발견하였다(Tetragon은 데몬이 완전히 죽어 있는 상태에서도 커널 쪽 차단이 계속됨을 확인). 다섯 개 프로그램의 link를 전부 `bpffs`에 핀하고, 재시작 시 새 attach를 먼저 만든 뒤에야 옛 핀을 지우는 순서로 보호 공백 없이 교체되도록, 반대로 SIGINT/SIGTERM 같은 의도된 종료에서는 명시적으로 unpin해 실제로 꺼지도록 수정하였다. 수정 후 `kill -9`에도 5개 프로그램이 전부 잔존하며 공격이 여전히 차단됨을, SIGTERM으로는 핀이 실제로 사라짐을 VM에서 각각 확인하였다. 같은 문제가 SIGKILL이 아닌 동기적 사전 차단(LSM) 컴포넌트(`kshield_vpatch_lsm`, 3.5절)에도 있는지 이어서 확인한 결과 동일한 fail-open이 재현되었고, 같은 방식으로 고쳐 같은 방법으로 재검증하였다. 이 발견은 지금까지의 (1)~(3) 원칙이 탐지 로직의 "정확성"을 겨냥한 것이었다면, 그 정확한 로직을 실제로 커널에 유지시키는 메커니즘의 "강건성"은 완전히 별개의 축이며 따로 검증하지 않으면 놓치기 쉽다는 점을 보여준다 — 그리고 그 강건성 문제는 한 컴포넌트에 국한되지 않고, 같은 아키텍처 패턴(맵만 핀하고 attach는 안 핀하는)을 공유하는 다른 컴포넌트에도 그대로 옮겨갈 수 있다는 점도 함께 보여준다.
+여섯째(7차), 지금까지 mock 서버로만 재현해 오던 검증의 공백 — "실제 Ray 클러스터에서도 이 탐지 로직이 그대로 통하는가" — 을 처음으로 다루었다(3.11절). 실제 Ray 2.52.0 클러스터를 VM에 띄우려 하자 kShield-VirtualPatch를 켠 상태에서는 클러스터 자체가 기동되지 않는 예상 밖의 결과를 만났다 — `watched_self[]`의 기본값 "raylet"이 진짜 Ray의 raylet과 정확히 일치했고, raylet이 GCS로 접속하는 트래픽이 loopback이 아닌 실제 네트워크 IP로 나가면서 SHADOW_CONNECT에 의해 즉시 SIGKILL당했기 때문이다. 이는 탐지 로직의 결함이 아니라, "낯선 목적지는 기본적으로 의심한다"는 설계 원칙을 실제 다중 프로세스 분산 시스템에 처음 적용해 보고서야 드러난 배포상의 함정이었다 — GCS IP를 미리 신뢰 목록에 등록해야 한다는 운영 지침이 새로 필요함을 보여준다. 이를 해소한 뒤에도 일부 워커 프로세스가 간헐적으로 죽는 현상이 남아 있었는데, 커널 디버그 출력으로 직접 추적한 결과 Ray의 gRPC 클라이언트가 신뢰된 목적지로도 IPv4-mapped IPv6 주소(`::ffff:a.b.c.d`)를 통해 접속을 시도하고 있었고, IPv6 경로에는 애초에 신뢰 목록 자체가 없어 무조건 차단되고 있었음을 확인하였다 — IPv4 신뢰 로직 자체는 처음부터 정확히 동작하고 있었다. 뒤에 담긴 실제 IPv4 주소를 꺼내 기존 IPv4 신뢰 목록으로 재판정하도록 고친 뒤, 실제 Jobs API로 제출한 정상 job 5개는 전부 성공하고 악성 job(`nc`)은 SHADOW_EXEC으로 정확히 차단됨을 확인하였다. 이 발견은 mock 기반 검증이 아무리 촘촘해도, "탐지 대상 프로세스명이 방어 도구 자신이 보호해야 할 정상 인프라의 프로세스명과 우연히 겹칠 수 있다"거나 "실제 분산 시스템은 dual-stack 등 mock이 재현하지 않는 통신 경로를 쓴다"는 것처럼, 진짜 대상 환경에 처음 적용해 보기 전까지는 드러나지 않는 한 축의 위험이 따로 있음을 보여준다.
 
-열째, 아홉째의 재시작 핸드오프 재측정 과정에서, 이번에는 v11과 무관한 별개의 탐지 공백을 우연히 발견하였다(3.12절, v12) — kprobe 기반 컴포넌트의 `watched_self[]`(3.7절, v6) 검사가 fork 없이 자기 자신을 다른 바이너리로 치환하는 self-exec 케이스(bash의 단일 명령 exec 치환 최적화)를 놓친다는 것이다. 원인은 `tp/sched/sched_process_exec` 훅이 `execve()` 완료 *이후*에 발동해 그 시점엔 이미 `comm`이 바뀌어 있기 때문이며, 같은 검사가 `execve()` *이전*에 발동하는 LSM 컴포넌트에서는 문제없이 통과한다. `execve()` 진입 시점에 훅을 하나 추가해 `comm`이 바뀌기 전에 미리 계보에 등록해 두는 방식으로 해소하였고, 기존 exec/connect 판정 코드는 전혀 손대지 않았다. 이 발견은 아홉째와 마찬가지로 "같은 판정 로직도 훅이 커널 실행 흐름의 어느 지점에 걸리는가에 따라 결과가 달라질 수 있다"는, 개별 컴포넌트 검증만으로는 드러나지 않는 교차 컴포넌트 비교의 가치를 다시 한번 보여준다 — 두 차례(아홉째, 열째) 모두 서로 다른 컴포넌트를 나란히 비교하는 과정에서만 드러난 문제였다.
-
-열한째, 지금까지 mock 서버로만 재현해 오던 검증의 공백 — "실제 Ray 클러스터에서도 이 탐지 로직이 그대로 통하는가" — 을 처음으로 다루었다(3.13절, v13). 실제 Ray 2.52.0 클러스터를 VM에 띄우려 하자 kShield-VirtualPatch를 켠 상태에서는 클러스터 자체가 기동되지 않는 예상 밖의 결과를 만났다 — `watched_self[]`의 기본값 "raylet"이 진짜 Ray의 raylet과 정확히 일치했고, raylet이 GCS로 접속하는 트래픽이 loopback이 아닌 실제 네트워크 IP로 나가면서 SHADOW_CONNECT에 의해 즉시 SIGKILL당했기 때문이다. 이는 탐지 로직의 결함이 아니라, "낯선 목적지는 기본적으로 의심한다"는 설계 원칙을 실제 다중 프로세스 분산 시스템에 처음 적용해 보고서야 드러난 배포상의 함정이었다 — GCS IP를 미리 신뢰 목록에 등록해야 한다는 운영 지침이 새로 필요함을 보여준다. 이를 해소한 뒤에도 일부 워커 프로세스가 간헐적으로 죽는 현상이 남아 있었는데, 커널 디버그 출력으로 직접 추적한 결과 Ray의 gRPC 클라이언트가 신뢰된 목적지로도 IPv4-mapped IPv6 주소(`::ffff:a.b.c.d`)를 통해 접속을 시도하고 있었고, IPv6 경로에는 애초에 신뢰 목록 자체가 없어 무조건 차단되고 있었음을 확인하였다 — IPv4 신뢰 로직 자체는 처음부터 정확히 동작하고 있었다. 뒤에 담긴 실제 IPv4 주소를 꺼내 기존 IPv4 신뢰 목록으로 재판정하도록 고친 뒤, 실제 Jobs API로 제출한 정상 job 5개는 전부 성공하고 악성 job(`nc`)은 SHADOW_EXEC으로 정확히 차단됨을 확인하였다. 이 발견은 mock 기반 검증이 아무리 촘촘해도, "탐지 대상 프로세스명이 방어 도구 자신이 보호해야 할 정상 인프라의 프로세스명과 우연히 겹칠 수 있다"거나 "실제 분산 시스템은 dual-stack 등 mock이 재현하지 않는 통신 경로를 쓴다"는 것처럼, 진짜 대상 환경에 처음 적용해 보기 전까지는 드러나지 않는 한 축의 위험이 따로 있음을 보여준다.
-
-열두째, 열한째에서 검증한 것은 kprobe/tracepoint 기반 메인 구현뿐이었다는 점을 곧바로 이어서 확인하였다(3.14절, v14) — 같은 실제 Ray 클러스터에 LSM 훅 기반 사전 차단 컴포넌트(`kshield_vpatch_lsm`)를 붙이자, 서로 다른 독립 BPF 오브젝트임에도 `kshield_lsm_socket_connect`의 AF_INET6 분기에 v13과 완전히 동일한 IPv4-mapped IPv6 신뢰 우회가 각자 따로 존재하고 있었음이 드러났다 — 신규로 fork되는 워커마다 GCS 연결이 `-EPERM`으로 막혀 제출한 job이 전부 PENDING에 정체되었다. v13과 동일한 판정 로직을 이식하여 해소하였고, 재검증 결과 정상 job 5개는 모두 SUCCEEDED, 악성 job은 `execve()` 자체가 사전 차단되어 exit code 126으로 실패함을 확인하였다. 이 발견은 아홉째(fail-open 패턴)에서와 마찬가지로, 같은 취약 패턴이 한 컴포넌트에서 발견·수정되었다고 해서 유사한 로직을 독자적으로 유지하는 다른 컴포넌트에 자동으로 전파되지는 않는다는 점을 다시 한번 보여준다 — 공유되지 않는 중복 로직은 반드시 각각 따로 검증해야 한다.
+일곱째(8차), 여섯째에서 검증한 것은 kprobe/tracepoint 기반 메인 구현뿐이었다는 점을 곧바로 이어서 확인하였다(3.12절) — 같은 실제 Ray 클러스터에 LSM 훅 기반 사전 차단 컴포넌트(`kshield_vpatch_lsm`)를 붙이자, 서로 다른 독립 BPF 오브젝트임에도 `kshield_lsm_socket_connect`의 AF_INET6 분기에 여섯째와 완전히 동일한 IPv4-mapped IPv6 신뢰 우회가 각자 따로 존재하고 있었음이 드러났다 — 신규로 fork되는 워커마다 GCS 연결이 `-EPERM`으로 막혀 제출한 job이 전부 PENDING에 정체되었다. 여섯째와 동일한 판정 로직을 이식하여 해소하였고, 재검증 결과 정상 job 5개는 모두 SUCCEEDED, 악성 job은 `execve()` 자체가 사전 차단되어 exit code 126으로 실패함을 확인하였다. 이 발견은 넷째(fail-open 패턴)에서와 마찬가지로, 같은 취약 패턴이 한 컴포넌트에서 발견·수정되었다고 해서 유사한 로직을 독자적으로 유지하는 다른 컴포넌트에 자동으로 전파되지는 않는다는 점을 다시 한번 보여준다 — 공유되지 않는 중복 로직은 반드시 각각 따로 검증해야 한다.
 향후 연구 과제는 다음과 같다. 본 논문의 핵심 주장(탐지 가능, 오탐 없음, 성능 무영향) 자체의 신뢰도에 직결되는 항목과, 적용 범위를 넓히는 지엽적인 항목을 구분하여 제시한다.
 
 **핵심 주장의 검증 강화 (우선순위 높음)**
-- **실제 Ray 클러스터 환경 검증의 확장**: 3.13절(v13)·3.14절(v14)에서 메인 구현과 LSM 컴포넌트 양쪽 모두 실제 Ray 2.52.0 클러스터의 실제 Jobs API를 통해 정상 job 5회 성공·악성 job 1회 차단을 확인하여, 이 항목은 기본적인 수준에서 해소되었다. 다만 (1) 검증한 entrypoint는 두 컴포넌트 모두 단순 서브프로세스 실행(`python3 -c ...`, `nc`)뿐이며, Ray actor·`@ray.remote` 클래스·멀티프로세싱 기반의 더 복잡한 job 실행 경로는 아직 검증하지 못했다 — 3.7절(v6)에서 다룬 것과 유사한 계보 추적 사각지대가 이런 경로에 다른 형태로 남아있을 가능성을 배제할 수 없다. (2) 단일 노드 클러스터·단일 세션 기준이며, 다중 노드 클러스터에서의 검증과 그때 필요한 신뢰 목록(각 노드 IP) 등록 부담의 정량화가 필요하다. (3) LSM 컴포넌트의 `enforce_mode` audit-only 모드는 실제 클러스터에서 검증하지 않았다.
-- **오탐 시나리오 확장 검증**: `echo`, `python3 -c` 같은 단순 job과 curl/wget 정상 다운로드(3.6절)는 실측으로 검증하였다. 다만 AI 워커가 그 밖의 서브프로세스를 실행하거나 외부와 통신하는 더 복잡한 합법적 워크로드(예: 데이터 전처리 파이프라인, pip/conda 패키지 설치, 정상적인 API 호출)와의 충돌 가능성은 아직 다양한 시나리오로 검증하지 못했다.
+- **실제 Ray 클러스터 환경 검증의 확장**: 3.11절(7차)·3.12절(8차)에서 메인 구현과 LSM 컴포넌트 양쪽 모두 실제 Ray 2.52.0 클러스터의 실제 Jobs API를 통해 정상 job 5회 성공·악성 job 1회 차단을 확인하여, 이 항목은 기본적인 수준에서 해소되었다. 다만 (1) 검증한 entrypoint는 두 컴포넌트 모두 단순 서브프로세스 실행(`python3 -c ...`, `nc`)뿐이며, Ray actor·`@ray.remote` 클래스·멀티프로세싱 기반의 더 복잡한 job 실행 경로는 아직 검증하지 못했다 — 3.3절에서 다룬 것과 유사한 계보 추적 사각지대가 이런 경로에 다른 형태로 남아있을 가능성을 배제할 수 없다. (2) 단일 노드 클러스터·단일 세션 기준이며, 다중 노드 클러스터에서의 검증과 그때 필요한 신뢰 목록(각 노드 IP) 등록 부담의 정량화가 필요하다. (3) LSM 컴포넌트의 `enforce_mode` audit-only 모드는 실제 클러스터에서 검증하지 않았다.
+- **오탐 시나리오 확장 검증**: `echo`, `python3 -c` 같은 단순 job과 curl/wget 정상 다운로드(3.3절)는 실측으로 검증하였다. 다만 AI 워커가 그 밖의 서브프로세스를 실행하거나 외부와 통신하는 더 복잡한 합법적 워크로드(예: 데이터 전처리 파이프라인, pip/conda 패키지 설치, 정상적인 API 호출)와의 충돌 가능성은 아직 다양한 시나리오로 검증하지 못했다.
 - **`kshield_vpatch_lsm`의 N회 반복 탐지율 측정과 정밀 SIGKILL 지연시간 측정**: 4.3절에서 `kshield_vpatch`(SHADOW_EXEC/CONNECT)는 N=30 반복으로 탐지율(30/30, 30/30)과 소요시간 분포를 확인하였다. `kshield_vpatch_lsm`(3.5절)에는 아직 동일한 반복 측정을 적용하지 않았다. 아울러 4.3절에서 잰 것은 유저스페이스 벽시계 시간이며, `bpf_ktime_get_ns()` 기반의 진짜 마이크로초 단위 SIGKILL 전달 지연시간은 별도 계측이 필요하다.
 - **동등성 검정(TOST) 수행**: 4.4절에서 다중비교 보정과 검정력 한계를 논의하였듯, 성능 무영향을 통계적으로 엄밀히 증명하려면 TOST 기반 동등성 검정과 표본 크기 확대(N≥30)가 필요하다. 4.5절의 Falco/Tetragon 비교에는 이미 TOST(마진 ±2%, 사전 고정)를 적용하였으나 N=20·VM 1대·세션 1회에 그친다 — 여러 세션에 걸친 반복과 더 큰 표본으로 재검증할 필요가 있다.
 - **Falco "무룰 시 오버헤드 증가" 기전 규명**: 4.5.1절의 대조군 실험(falco_norules/tetragon_norules)으로 Tetragon의 오버헤드는 정책 내용과 무관한 에이전트 기반 비용이며, kShield-VirtualPatch의 경량성이 AI 서버 전용으로 좁게 쓴 룰 덕분이 아님을 확인했다. 다만 Falco에서 룰을 제거했을 때 오버헤드가 오히려 커진 현상에 대해 제시한 "이벤트 유형 필터링" 설명은 libsinsp 내부 계측으로 검증하지 않은 추정이다 — 코드 수준 확인이나 이벤트 유형별 더미 룰 같은 후속 대조군으로 확정할 필요가 있다.
 
 **적용 범위 확장 (우선순위 낮음)**
 - **다른 CVE로의 일반화**: 4.6절에서 TorchServe(CVE-2023-43654)·MLflow(CVE-2024-37054)·Triton(CVE-2023-31036)·vLLM(CVE-2025-66448)·BentoML(CVE-2024-2912/2025-27520)·Gradio(CVE-2024-1561)·text-generation-webui(CVE-2025-12487/88) 일곱 사례에 대해 커널 코드 변경 없이 `kshield_ctl parent-add` 런타임 등록만으로 탐지됨을 예비 확인하였고, 4.6.1절에서 같은 일곱 사례에 대해 Falco·Tetragon도 룰/정책에 이름·경로만 추가하면 동일하게 탐지함을 확인하였다. 다만 전부 1회 기능 확인에 그쳐, 4.3~4.5절 수준의 반복 통계 측정과 세 도구 간 오버헤드·성능 비교는 아직 없다. 일곱 프레임워크 모두 이 수준까지 검증을 넓힐 필요가 있으며, 아직 다루지 않은 다른 CVE·프레임워크로도 계속 확장할 수 있다.
-- **진짜 쿠버네티스 네임스페이스 인지**: v10의 cgroup 단위 예외는 "네임스페이스"의 근사치일 뿐이다. cgroup ID를 실제 K8s 네임스페이스로 매핑하려면 K8s API 서버를 감시하는 별도 컨트롤 플레인이 필요하며, 이는 현재 범위를 크게 벗어난다.
-- **syslog 연동의 종단 검증**: `--syslog`(3.9절)는 로컬 syslog 소켓에 JSON이 정확히 기록되는 것까지만 확인하였다. 실제 rsyslog/journald 포워더를 거쳐 SIEM(Splunk, ELK 등)까지 도달·파싱되는지는 검증하지 않았다.
-- **`kshield_ctl` 대량 설정 지원**: v10부터 하위 명령이 18개(6개 리소스 × 3개 동작)로 늘어났다. 여러 규칙을 한 번에 넣는 설정 파일/벌크 가져오기 기능은 아직 없다.
+- **진짜 쿠버네티스 네임스페이스 인지**: 4차(3.8절)의 cgroup 단위 예외는 "네임스페이스"의 근사치일 뿐이다. cgroup ID를 실제 K8s 네임스페이스로 매핑하려면 K8s API 서버를 감시하는 별도 컨트롤 플레인이 필요하며, 이는 현재 범위를 크게 벗어난다.
+- **syslog 연동의 종단 검증**: `--syslog`(3.7절)는 로컬 syslog 소켓에 JSON이 정확히 기록되는 것까지만 확인하였다. 실제 rsyslog/journald 포워더를 거쳐 SIEM(Splunk, ELK 등)까지 도달·파싱되는지는 검증하지 않았다.
+- **`kshield_ctl` 대량 설정 지원**: 4차부터 하위 명령이 18개(6개 리소스 × 3개 동작)로 늘어났다. 여러 규칙을 한 번에 넣는 설정 파일/벌크 가져오기 기능은 아직 없다.
 - **고동시성 환경에서의 시스템 전역 오버헤드**: AI 워커 계보와 무관한 프로세스의 순차적 connect() 성능에는 유의미한 영향이 없음을 확인하였다(4.4절, `benchmark_unrelated_connect.py`). 다만 이는 순차 요청 기준이며, 다수의 무관한 프로세스가 동시다발적으로 connect()를 시도하는 고동시성 상황에서의 영향은 아직 측정하지 않았다.
 - **정밀 per-fork 비용의 여러 세션 재검증**: 4.4절에서 `bpf_ktime_get_ns()` 기반 격리 측정으로 fork+exit 훅 자체의 비용이 약 1.72마이크로초임을 확인하여, 기존 end-to-end 추정치(약 0.2마이크로초)가 실제보다 8~9배 낮게 잡혀 있었음을 밝혔다. 다만 이 정밀 측정도 단일 세션 1회에 그치므로, 여러 세션에 걸친 반복 측정으로 재확인할 필요가 있다.
 - **실제 Ray의 fork 패턴 재현**: 본 실험의 fork 집약적 워크로드(`/bin/true` 반복 실행)는 실제 Ray 태스크의 워커 프로세스 생성 패턴을 정밀하게 재현한 것은 아니다. 실제 Ray 클러스터(위 항목 참고)의 태스크 처리량·fork 빈도를 프로파일링하여 더 현실적인 워크로드로 재측정할 필요가 있다.
 - **IPv6 신뢰 목적지 목록 지원**: 현재 IPv6는 loopback(`::1`) 외 모든 목적지를 의심으로 간주하며, IPv4의 `trusted_dst_ipv4_map`에 대응하는 신뢰 목록이 없다.
 - **DNS 터널링 등 잔여 우회 대응**: 허용된 프로토콜(DNS 등) 위로 데이터를 은닉하는 터널링, 기존 정상 연결에 얹혀가는 방식 등 SHADOW_CONNECT로도 막지 못하는 우회에 대한 추가 탐지 계층 연구가 필요하다.
-- **프로세스명 위장 및 인프로세스 코드 실행 대응**: `watched_self[]`(3.7절)는 comm이 정확히 일치하는 경우만 다룬다. 공격자가 감시 목록에 없는 이름으로 바이너리를 배치하거나, 별도 프로세스 생성 없이 기존 감시 대상 프로세스의 메모리 공간 안에서 코드 실행 흐름 자체를 탈취하는 경우(예: 인터프리터 내부의 코드 인젝션)는 다루지 않는다.
-- **재시작 핸드오프 순간의 마이크로초 단위 정밀 계측**: 3.11절에서 밀리초 단위(150회, 약 15~20ms 간격, 단일 세션 1회, `kshield_vpatch`·`kshield_vpatch_lsm` 두 컴포넌트 모두)로는 재시작 핸드오프 구간에 공백이 없음을 실측으로 확인하였다. 다만 이는 유저스페이스 프로세스(`nc`) fork/exec 기반 측정의 해상도 한계 안에서의 결과이며, 코드상 진짜 위험 구간인 `bpf_link__pin`/`unlink` 교체 찰나의 마이크로초 단위 공백 유무는 `bpf_ktime_get_ns()` 기반의 커널 내부 계측과 여러 세션에 걸친 반복 측정이 필요하다.
-- **`watched_self[]`의 `execveat()` 기반 self-exec 치환 탐지**: 3.12절(v12)에서 `execve()` 기반 self-exec 치환(bash의 단일 명령 exec 최적화)은 새 훅(`tp/syscalls/sys_enter_execve`)으로 해소하였다. 다만 `execveat()`(예: `fexecve()`)를 통한 동일한 치환은 별도 훅이 없어 여전히 놓칠 수 있으며, 이에 대한 보완과 N회 반복 검증이 필요하다.
+- **프로세스명 위장 및 인프로세스 코드 실행 대응**: `watched_self[]`(3.3절)는 comm이 정확히 일치하는 경우만 다룬다. 공격자가 감시 목록에 없는 이름으로 바이너리를 배치하거나, 별도 프로세스 생성 없이 기존 감시 대상 프로세스의 메모리 공간 안에서 코드 실행 흐름 자체를 탈취하는 경우(예: 인터프리터 내부의 코드 인젝션)는 다루지 않는다.
+- **재시작 핸드오프 순간의 마이크로초 단위 정밀 계측**: 3.9절에서 밀리초 단위(150회, 약 15~20ms 간격, 단일 세션 1회, `kshield_vpatch`·`kshield_vpatch_lsm` 두 컴포넌트 모두)로는 재시작 핸드오프 구간에 공백이 없음을 실측으로 확인하였다. 다만 이는 유저스페이스 프로세스(`nc`) fork/exec 기반 측정의 해상도 한계 안에서의 결과이며, 코드상 진짜 위험 구간인 `bpf_link__pin`/`unlink` 교체 찰나의 마이크로초 단위 공백 유무는 `bpf_ktime_get_ns()` 기반의 커널 내부 계측과 여러 세션에 걸친 반복 측정이 필요하다.
+- **`watched_self[]`의 `execveat()` 기반 self-exec 치환 탐지**: 3.10절(6차)에서 `execve()` 기반 self-exec 치환(bash의 단일 명령 exec 최적화)은 새 훅(`tp/syscalls/sys_enter_execve`)으로 해소하였다. 다만 `execveat()`(예: `fexecve()`)를 통한 동일한 치환은 별도 훅이 없어 여전히 놓칠 수 있으며, 이에 대한 보완과 N회 반복 검증이 필요하다.
 
 ---
 

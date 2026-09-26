@@ -13,7 +13,7 @@
 #                        security_socket_connect에서 동기적으로 -EPERM 반환.
 #                        CONFIG_BPF_LSM=y 및 활성 LSM 목록에 "bpf" 필요.
 #                        기능·성능 검증 완료(paper_draft.md 3.5절, 4.4절).
-#   kshield_ctl          신뢰 목적지 IP 런타임 제어 도구(v8). 위 두 데몬이 핀해
+#   kshield_ctl          신뢰 목적지 IP 런타임 제어 도구(2차). 위 두 데몬이 핀해
 #                        둔 trusted_dst_ipv4_map을 add/del/list한다. 데몬 재시작·
 #                        재컴파일 불필요(paper_draft.md 3.9절).
 

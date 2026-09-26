@@ -47,7 +47,7 @@
  *   attach 실패 시 사용자 공간 로더(kshield_vpatch_lsm.c)가 원인을
  *   진단할 수 있는 메시지를 출력하도록 작성되어 있다.
  *
- * v13-lsm 재검토 (실제 Ray 클러스터 검증 중 발견): 위 "검증 완료"는 mock
+ * 8차 재검토 (실제 Ray 클러스터 검증 중 발견): 위 "검증 완료"는 mock
  * 서버 기준이었고, 실제 Ray 클러스터에 이 LSM 컴포넌트를 처음 붙여본
  * 결과 kshield_vpatch.bpf.c에서 v13으로 고쳤던 것과 동일한 IPv4-mapped
  * IPv6 신뢰 우회 문제가 이 파일의 kshield_lsm_socket_connect에도 그대로
@@ -73,7 +73,7 @@ char LICENSE[] SEC("license") = "GPL";
 #define EVT_LSM_EXEC_BLOCK    3
 #define EVT_LSM_CONNECT_BLOCK 4
 
-/* v10: kshield_vpatch.bpf.c와 동일한 재검토 — watched_parents[]/
+/* 4차: kshield_vpatch.bpf.c와 동일한 재검토 — watched_parents[]/
  * watched_self[]/suspicious_bins[]를 rodata에서 BPF map으로 전환한다
  * (상세 근거는 그 파일 헤더 참고). 이 파일은 독립된 BPF 오브젝트이므로
  * 맵을 공유하지 않고 자체 사본을 둔다. `kshield_ctl`이
@@ -100,7 +100,7 @@ struct {
     __type(value, __u8);
 } suspicious_bins_map SEC(".maps");
 
-/* v8 재검토: 신뢰 목적지 IP를 rodata 배열이 아닌 BPF map으로 관리한다
+/* 2차 재검토: 신뢰 목적지 IP를 rodata 배열이 아닌 BPF map으로 관리한다
  * (kshield_vpatch.bpf.c와 동일한 재검토 — 상세 근거는 그 파일 헤더 참고).
  * `kshield_ctl`이 `/sys/fs/bpf/kshield_trusted_ips_lsm`에 핀된 이 맵을
  * add/del/list하며, 데몬 재시작·재컴파일이 필요 없다. */
@@ -111,7 +111,7 @@ struct {
     __type(value, __u8);
 } trusted_dst_ipv4_map SEC(".maps");
 
-/* v5: audit-only(감사 전용) 모드. kshield_vpatch.bpf.c와 동일한 목적 —
+/* audit-only(감사 전용) 모드. kshield_vpatch.bpf.c와 동일한 목적 —
  * 신규 룰을 먼저 "탐지만 하고 차단은 안 함"으로 배포해 오탐을 관찰한 뒤
  * 실제 차단(-EPERM)으로 전환할 수 있게 한다. 1(기본값)이면 기존과 동일하게
  * -EPERM으로 execve()/connect()를 실패시키고, 0이면 이벤트만 기록하고
@@ -146,7 +146,7 @@ struct {
     __type(value, __u8);
 } ai_worker_lineage SEC(".maps");
 
-/* v9: kshield_vpatch.bpf.c와 동일한 재검토 — 검증된 사용자(UID) 단위로
+/* 3차: kshield_vpatch.bpf.c와 동일한 재검토 — 검증된 사용자(UID) 단위로
  * 감시를 예외 처리할 수 있게 한다(상세 근거는 그 파일 헤더 참고). */
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
@@ -155,7 +155,7 @@ struct {
     __type(value, __u8);
 } exempt_uids_map SEC(".maps");
 
-/* v10: kshield_vpatch.bpf.c와 동일한 재검토 — cgroup(≈컨테이너/파드)
+/* 4차: kshield_vpatch.bpf.c와 동일한 재검토 — cgroup(≈컨테이너/파드)
  * 단위 예외(상세 근거는 그 파일 헤더 참고). */
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
@@ -174,14 +174,14 @@ static __always_inline int is_watched_self(const char *comm)
     return bpf_map_lookup_elem(&watched_self_map, comm) != NULL;
 }
 
-/* v6: kshield_vpatch.bpf.c와 동일한 재검토 — "자손"만 계보에 편입되고
+/* kshield_vpatch.bpf.c와 동일한 재검토 — "자손"만 계보에 편입되고
  * 감시 대상 프로세스 자신의 직접 행위는 놓치는 공백을 자기 자신 comm
  * 확인(watched_self[])으로 메운다.
  *
- * v9: exempt_uids_map에 있는 UID는 최우선으로 감시 대상에서 제외한다
+ * 3차: exempt_uids_map에 있는 UID는 최우선으로 감시 대상에서 제외한다
  * (상세 근거는 kshield_vpatch.bpf.c 헤더 참고).
  *
- * v10: exempt_cgroups_map도 동일하게 최우선 확인한다. */
+ * 4차: exempt_cgroups_map도 동일하게 최우선 확인한다. */
 static __always_inline int current_is_watched(char (*parent_comm_out)[MAX_COMM_LEN])
 {
     __u32 uid = (__u32)bpf_get_current_uid_gid();
@@ -360,7 +360,7 @@ int BPF_PROG(kshield_lsm_socket_connect, struct socket *sock, struct sockaddr *a
         if (is_v6_loopback)
             return 0;
 
-        /* v13-lsm 재검토: 실제 Ray 클러스터에 이 LSM 컴포넌트를 붙여
+        /* 8차 재검토: 실제 Ray 클러스터에 이 LSM 컴포넌트를 붙여
          * 검증하던 중, kshield_vpatch.bpf.c의 trace_shadow_connect_v6와
          * 완전히 동일한 문제를 발견하였다 — Ray의 gRPC 클라이언트가 신뢰
          * 목적지 IP(GCS 서버 자신의 IP)로도 IPv4-mapped IPv6 주소

@@ -13,20 +13,20 @@
  * 반환하지 않아 execve()/connect()가 정상 진행되게 둔다(BPF 쪽
  * enforce_mode 전역 변수를 0으로 설정, 재컴파일 불필요).
  *
- * v8: trusted_dst_ipv4_map을 /sys/fs/bpf/kshield_trusted_ips_lsm에 핀해
+ * 2차: trusted_dst_ipv4_map을 /sys/fs/bpf/kshield_trusted_ips_lsm에 핀해
  * 둔다. 신뢰 목적지 IP의 add/del/list는 kshield_vpatch.c와 마찬가지로
  * 별도 유틸리티 kshield_ctl이 담당한다.
  *
- * v9: --syslog 플래그로 탐지 이벤트를 syslog(LOG_AUTHPRIV)에도 JSON 한
+ * 3차: --syslog 플래그로 탐지 이벤트를 syslog(LOG_AUTHPRIV)에도 JSON 한
  * 줄씩 남긴다(kshield_vpatch.c와 동일한 이유 — 기존 SIEM 파이프라인에
  * 올라타기 위함). exempt_uids_map도 함께 핀해, 검증된 사용자(UID) 단위로
  * 감시를 예외 처리할 수 있게 한다.
  *
- * v10: watched_parents_map/watched_self_map/suspicious_bins_map/
+ * 4차: watched_parents_map/watched_self_map/suspicious_bins_map/
  * exempt_cgroups_map도 핀한다(kshield_vpatch.c와 동일한 이유 — 상세
  * 근거는 그 파일 참고).
  *
- * v11: kshield_vpatch.c에 적용한 것과 동일한 수정 — 맵만 핀하고 BPF
+ * 5차: kshield_vpatch.c에 적용한 것과 동일한 수정 — 맵만 핀하고 BPF
  * 프로그램의 부착(link) 자체는 핀하지 않아, 데몬을 kill -9로 죽이면
  * bprm_check_security/socket_connect LSM 훅이 커널에서 통째로 사라지는
  * fail-open임을 VM에서 직접 확인하였다(강제 종료 전엔 execve(nc)가
@@ -182,7 +182,7 @@ static int libbpf_print_fn(enum libbpf_print_level level, const char *fmt, va_li
     return vfprintf(stderr, fmt, args);
 }
 
-/* v10: kshield_vpatch.c와 동일한 재검토 — watched_parents[]/watched_self[]가
+/* 4차: kshield_vpatch.c와 동일한 재검토 — watched_parents[]/watched_self[]가
  * rodata에서 BPF map으로 바뀌면서, 맵이 "새로 생성되는" 경우에만 기존
  * PoC 기본값을 시드로 채운다(상세 근거는 그 파일 참고). */
 static int path_exists(const char *path)
@@ -190,7 +190,7 @@ static int path_exists(const char *path)
     return access(path, F_OK) == 0;
 }
 
-/* v11: kshield_vpatch.c와 동일한 이유·순서 — 상세 근거는 그 파일 참고. */
+/* 5차: kshield_vpatch.c와 동일한 이유·순서 — 상세 근거는 그 파일 참고. */
 static const char *link_pin_paths[] = {
     "/sys/fs/bpf/kshield_link_lsm_lineage_fork",
     "/sys/fs/bpf/kshield_link_lsm_lineage_exit",
@@ -251,7 +251,7 @@ static void seed_str_map(int fd, const char *const *values, int count, int key_l
 }
 
 /*
- * v7: kshield_vpatch.c와 동일한 재검토 — 데몬이 이미 실행 중인 클러스터에
+ * 1차: kshield_vpatch.c와 동일한 재검토 — 데몬이 이미 실행 중인 클러스터에
  * 나중에 붙거나 재시작되면 ai_worker_lineage map이 빈 상태로 시작해,
  * 데몬 기동 전부터 떠 있던 워커의 자손 프로세스는 스스로 다시 fork하기
  * 전까지 계보로 인식되지 않는다. BPF 프로그램은 그대로 두고, 유저스페이스
@@ -411,7 +411,7 @@ int main(int argc, char **argv)
 
     skel->data->enforce_mode = audit_only ? 0 : 1;
 
-    /* v8: trusted_dst_ipv4_map을 bpffs에 핀해 kshield_ctl이 재시작·재컴파일
+    /* 2차: trusted_dst_ipv4_map을 bpffs에 핀해 kshield_ctl이 재시작·재컴파일
      * 없이 신뢰 목적지 IP를 add/del할 수 있게 한다(kshield_vpatch.c와 동일한
      * 이유 — 상세 근거는 그 파일 참고). v3와 별도 경로를 쓰는 이유는 두
      * 컴포넌트가 서로 다른 BPF 오브젝트라 맵을 공유하지 않기 때문이다. */
@@ -419,12 +419,12 @@ int main(int argc, char **argv)
         fprintf(stderr, "[경고] trusted_dst_ipv4_map pin 경로 설정 실패: %s\n", strerror(errno));
     }
 
-    /* v9: exempt_uids_map도 핀한다(kshield_vpatch.c와 동일한 이유). */
+    /* 3차: exempt_uids_map도 핀한다(kshield_vpatch.c와 동일한 이유). */
     if (bpf_map__set_pin_path(skel->maps.exempt_uids_map, "/sys/fs/bpf/kshield_exempt_uids_lsm")) {
         fprintf(stderr, "[경고] exempt_uids_map pin 경로 설정 실패: %s\n", strerror(errno));
     }
 
-    /* v10: 네 개 맵을 추가로 핀한다(kshield_vpatch.c와 동일한 이유 —
+    /* 4차: 네 개 맵을 추가로 핀한다(kshield_vpatch.c와 동일한 이유 —
      * 상세 근거는 그 파일 참고). */
     int watched_parents_is_new = !path_exists("/sys/fs/bpf/kshield_watched_parents_lsm");
     int watched_self_is_new    = !path_exists("/sys/fs/bpf/kshield_watched_self_lsm");

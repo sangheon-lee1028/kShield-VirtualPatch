@@ -15,19 +15,19 @@
  * WAF 신규 룰을 먼저 감사(alert-only)로 배포해 오탐을 관찰한 뒤 차단으로
  * 전환하는 업계 관행을 반영한 것으로, 재컴파일 없이 실행 시점에 설정된다.
  *
- * v8: trusted_dst_ipv4_map을 /sys/fs/bpf/kshield_trusted_ips_v3에 핀해 둔다.
+ * 2차: trusted_dst_ipv4_map을 /sys/fs/bpf/kshield_trusted_ips_v3에 핀해 둔다.
  * 신뢰 목적지 IP를 운영 중에 추가/삭제하려면 별도 유틸리티 kshield_ctl을
  * 쓴다 — 이 로더 자체는 맵을 만들고 핀하기만 하고, 이후의 add/del/list는
  * 전부 kshield_ctl이 담당한다.
  *
- * v9: --syslog 플래그를 주면 탐지 이벤트를 사람이 읽는 콘솔 출력에 더해
+ * 3차: --syslog 플래그를 주면 탐지 이벤트를 사람이 읽는 콘솔 출력에 더해
  * syslog(LOG_AUTHPRIV)로도 JSON 한 줄씩 남긴다. 기업 환경에는 이미 SIEM에
  * 로그를 모으는 rsyslog/journald 파이프라인이 있는 경우가 대부분이므로,
  * 이 프로그램만을 위한 전용 연동을 새로 만드는 대신 이미 있는 그 통로에
  * 올라타는 쪽을 택했다 — Falco 등 기존 런타임 보안 도구도 syslog를 출력
  * 채널 중 하나로 지원한다.
  *
- * v10: watched_parents_map/watched_self_map/suspicious_bins_map도
+ * 4차: watched_parents_map/watched_self_map/suspicious_bins_map도
  * trusted_dst_ipv4_map과 동일하게 bpffs에 핀한다. 맵이 "새로 생성되는"
  * 경우에만(핀 경로가 아직 없을 때) 기존 PoC 기본값(raylet/ray::IDLE/
  * python3, nc/ncat 등)을 시드로 채우고, 재시작 시에는 운영자가
@@ -35,7 +35,7 @@
  * exempt_uids_map과 동일한 목적으로 핀하되(UID보다 세밀한 컨테이너/파드
  * 단위 예외) 기본값 시드는 없다.
  *
- * v11: 지금까지는 skel->maps.*만 핀했고, 실제 판정·SIGKILL을 수행하는 BPF
+ * 5차: 지금까지는 skel->maps.*만 핀했고, 실제 판정·SIGKILL을 수행하는 BPF
  * 프로그램의 부착(attach, struct bpf_link) 자체는 핀하지 않았다. 그 결과
  * 데몬이 정상 종료가 아니라 크래시하거나 kill -9로 죽으면, 그 attach를
  * 쥐고 있던 파일 디스크립터가 함께 닫히며 커널이 BPF 프로그램을 자동으로
@@ -50,7 +50,7 @@
  * 명시적으로 지운다 — SIGKILL은 애초에 핸들러를 타지 않으므로 이 경로를
  * 거치지 않고, 그래서 핀이 그대로 남아 계속 보호한다(의도한 동작).
  *
- * v12: v11 재측정 중, watched_self[]가 fork 없는 self-exec 치환(bash가
+ * 6차: 5차 재측정 중, watched_self[]가 fork 없는 self-exec 치환(bash가
  * 자기 자신을 execve()로 다른 바이너리로 치환)을 놓치는 문제를
  * 발견하였다 — 자세한 원인은 kshield_vpatch.bpf.c의 trace_lineage_selfexec
  * 주석 참고. 새 BPF 프로그램(tp/syscalls/sys_enter_execve)을 추가해
@@ -170,7 +170,7 @@ static int libbpf_print_fn(enum libbpf_print_level level, const char *fmt, va_li
     return vfprintf(stderr, fmt, args);
 }
 
-/* v10: watched_parents[]/watched_self[]가 rodata에서 BPF map으로 바뀌면서
+/* 4차: watched_parents[]/watched_self[]가 rodata에서 BPF map으로 바뀌면서
  * (아래 seed_str_map 주변 주석 참고), 더 이상 skel->rodata에서 판정 기준
  * 문자열을 읽어올 수 없다. path_exists()로 맵이 "새로 생성되는" 경우인지
  * 확인해, 그 경우에만 기존 PoC 기본값을 시드로 채운다 — 데몬이 재시작될
@@ -181,7 +181,7 @@ static int path_exists(const char *path)
     return access(path, F_OK) == 0;
 }
 
-/* v11: BPF link를 bpffs에 핀해 데몬 프로세스 생사와 무관하게 커널에
+/* 5차: BPF link를 bpffs에 핀해 데몬 프로세스 생사와 무관하게 커널에
  * 남긴다. 핀 경로에 이전 실행(크래시)이 남긴 핀이 있으면, 이 함수는
  * "새 link가 이미 attach되어 동작 중인" 시점에 호출되므로 먼저 지워도
  * 보호 공백이 생기지 않는다. */
@@ -251,18 +251,18 @@ static void seed_str_map(int fd, const char *const *values, int count, int key_l
 }
 
 /*
- * v7: 데몬이 이미 실행 중인 클러스터에 나중에 붙거나(최초 기동), 크래시나
+ * 1차: 데몬이 이미 실행 중인 클러스터에 나중에 붙거나(최초 기동), 크래시나
  * 업데이트로 재시작되면 ai_worker_lineage map은 빈 상태로 다시 시작한다.
  * 이 map은 sched_process_fork 훅이 "새로 fork되는 순간"에만 채우므로,
  * 데몬이 뜨기 전부터 이미 떠 있던 워커의 자손 프로세스는 자기 자신이
- * 다시 fork하기 전까지 어느 훅에도 계보로 인식되지 않는다 — v6에서 고친
+ * 다시 fork하기 전까지 어느 훅에도 계보로 인식되지 않는다 — 기본 설계에서 고친
  * "감시 대상 자신의 직접 행위" 공백과 같은 계열의 문제이며, 트리거가
  * "재시작/최초 기동"이라는 점만 다르다.
  *
  * 커널 BPF 프로그램을 건드리지 않고(맵 스키마·훅 로직 불변) 유저스페이스
  * 로더에서 /proc을 스캔해 이미 떠 있는 프로세스들의 계보를 동일한
  * ai_worker_lineage map에 직접 채워 넣는다. 판정 기준(watched_parents_map/
- * watched_self_map)은 v10부터 BPF map 조회로 확인한다 — rodata를 읽던
+ * watched_self_map)은 4차부터 BPF map 조회로 확인한다 — rodata를 읽던
  * 시절과 달리, 지금 이 순간 운영자가 kshield_ctl로 설정해 둔 최신 값을
  * 그대로 따른다.
  */
@@ -421,7 +421,7 @@ int main(int argc, char **argv)
 
     skel->data->enforce_mode = audit_only ? 0 : 1;
 
-    /* v8: trusted_dst_ipv4_map을 bpffs에 핀(pin)해, kshield_ctl 같은 별도
+    /* 2차: trusted_dst_ipv4_map을 bpffs에 핀(pin)해, kshield_ctl 같은 별도
      * 프로세스가 데몬 재시작 없이 신뢰 목적지 IP를 add/del할 수 있게 한다.
      * 이전 실행에서 이미 핀되어 있었다면(예: 데몬 재시작) libbpf가 기존
      * 맵을 그대로 재사용하므로, 신뢰 목적지 목록도 재시작 사이에 유지된다. */
@@ -429,7 +429,7 @@ int main(int argc, char **argv)
         fprintf(stderr, "[경고] trusted_dst_ipv4_map pin 경로 설정 실패: %s\n", strerror(errno));
     }
 
-    /* v9: exempt_uids_map도 동일한 이유로 핀한다 — GPU를 오래 점유하는
+    /* 3차: exempt_uids_map도 동일한 이유로 핀한다 — GPU를 오래 점유하는
      * job을 오탐으로 죽였을 때의 비용이 크므로, 검증된 사용자(UID) 단위로
      * 감시 자체를 예외 처리할 수 있어야 한다는 지적을 반영하였다.
      * kshield_ctl exempt-add/exempt-del/exempt-list로 운영 중에 관리한다. */
@@ -437,7 +437,7 @@ int main(int argc, char **argv)
         fprintf(stderr, "[경고] exempt_uids_map pin 경로 설정 실패: %s\n", strerror(errno));
     }
 
-    /* v10: 네 개 맵을 추가로 핀한다. 앞의 세 개(watched_parents_map/
+    /* 4차: 네 개 맵을 추가로 핀한다. 앞의 세 개(watched_parents_map/
      * watched_self_map/suspicious_bins_map)는 "새로 생성되는" 경우에만
      * 기본값을 시드로 채운다 — 핀 경로가 이미 있었는지를 로드 *전에*
      * 확인해 둬야 "새로 생성됨"인지 "기존 걸 재사용함"인지 구분할 수

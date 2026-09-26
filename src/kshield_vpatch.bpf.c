@@ -10,18 +10,16 @@
  * 같은 페이로드 다운로드용 바이너리를 실행하거나, 직접 소켓을 열어 외부와
  * 통신하게 된다.
  *
- * v2 설계 (v1의 문제를 실측으로 발견하여 수정):
- *   - v1은 "바로 위 부모"만 확인했다. 그런데 실제 실행 체인은
- *     python3(워커) → sh → curl 처럼 여러 단계를 거치므로, curl의 직속
- *     부모는 sh이지 워커가 아니라서 탐지가 안 되는 문제가 있었다.
- *   - 또한 job 실행기가 정상/악성 관계없이 항상 /bin/sh를 경유하는 구조라서,
- *     /bin/sh 자체를 의심 목록에 넣으면 정상 job까지 전부 오탐되는 문제가
- *     실제 VM 테스트에서 확인되었다.
- *   - v2는 sched_process_fork를 추가로 후킹하여 "AI 워커의 자손 프로세스"
- *     계보(lineage)를 BPF map으로 추적한다.
+ * 초기 설계는 "바로 위 부모"만 확인했다. 그런데 실제 실행 체인은
+ * python3(워커) → sh → curl 처럼 여러 단계를 거치므로, curl의 직속
+ * 부모는 sh이지 워커가 아니라서 탐지가 안 되는 문제가 있었다. 또한 job
+ * 실행기가 정상/악성 관계없이 항상 /bin/sh를 경유하는 구조라서, /bin/sh
+ * 자체를 의심 목록에 넣으면 정상 job까지 전부 오탐되는 문제가 실제 VM
+ * 테스트에서 확인되었다. 이를 해소하기 위해 sched_process_fork를 추가로
+ * 후킹하여 "AI 워커의 자손 프로세스" 계보(lineage)를 BPF map으로 추적한다.
  *
- * v3 설계 (v2의 한계를 실측 이후 재검토하여 보강):
- *   - v2의 SHADOW_EXEC 탐지는 suspicious_bins[]라는 "실행 파일 이름
+ * 이 계보 추적의 한계를 실측 이후 재검토하여 보강한 내용:
+ *   - SHADOW_EXEC 탐지는 suspicious_bins[]라는 "실행 파일 이름
  *     블록리스트"에 의존한다. 이는 다음과 같이 쉽게 우회 가능하다는
  *     한계가 있다:
  *       (a) bash의 내장 기능(`exec 3<>/dev/tcp/host/port`)은 curl/nc 같은
@@ -36,17 +34,17 @@
  *     이는 "어떤 바이너리를 실행했는가"가 아니라 "AI 워커 계보에서 신뢰
  *     되지 않은 목적지로 나가는 연결을 시도했는가"를 감시하면, 어떤
  *     바이너리·언어로 구현되었든 상관없이 포착할 수 있다는 뜻이다.
- *   - v3는 SHADOW_CONNECT 탐지를 추가한다: AI 워커 계보에 속한 프로세스가
- *     loopback(127.0.0.0/8) 또는 신뢰 목적지 목록(v8부터 trusted_dst_ipv4_map,
+ *   - SHADOW_CONNECT 탐지를 추가한다: AI 워커 계보에 속한 프로세스가
+ *     loopback(127.0.0.0/8) 또는 신뢰 목적지 목록(2차부터 trusted_dst_ipv4_map,
  *     이전에는 trusted_dst_ipv4[] rodata 배열)에 없는 목적지로
- *     연결을 시도하면 즉시 SIGKILL을 전송한다. 기존 SHADOW_EXEC(v2)는
+ *     연결을 시도하면 즉시 SIGKILL을 전송한다. 기존 SHADOW_EXEC은
  *     그대로 유지하여 두 계층이 함께 방어한다(defense-in-depth) — 알려진
  *     바이너리는 exec 시점에 더 일찍 잡고, 그 외 모든 경로는 connect
  *     시점에 잡는다.
- *   - 아울러 v2에는 프로세스 종료 시 ai_worker_lineage map을 정리하는
+ *   - 아울러 초기 설계에는 프로세스 종료 시 ai_worker_lineage map을 정리하는
  *     로직이 없어, PID 재사용 시 무관한 새 프로세스가 죽은 프로세스의
- *     계보 정보를 잘못 물려받을 수 있는 버그가 있었다. v3는
- *     sched_process_exit 훅으로 이를 정리한다.
+ *     계보 정보를 잘못 물려받을 수 있는 버그가 있었다. sched_process_exit
+ *     훅으로 이를 정리한다.
  *
  * 한계: SHADOW_CONNECT도 완전한 차단은 아니다. (1) 이미 열려 있는 정상
  * 연결에 얹혀 데이터를 빼가는 경우, (2) DNS 등 허용된 포트/프로토콜
@@ -57,12 +55,12 @@
  * 동기적 차단으로 전환 가능하나, CONFIG_BPF_LSM 및 활성 LSM 스택에 "bpf"
  * 포함이 필요해 배포 환경 의존성이 있다).
  *
- * 검증 완료(v2): VM 실측(Ubuntu, 실제 curl 사용)에서 정상 job(echo,
+ * 검증 완료: VM 실측(Ubuntu, 실제 curl 사용)에서 정상 job(echo,
  * python3 -c ...)은 오탐 없이 통과하고, python3 -> sh -> curl 2단계
  * 공격 체인은 curl exec 시점에 정확히 SIGKILL로 차단됨을 확인하였다.
  *
- * v4 재검토 (SHADOW_EXEC의 오탐 전제 자체를 재검토):
- *   - v2/v3까지는 curl/wget 실행 자체를 목적지와 무관하게 즉시 이상
+ * SHADOW_EXEC의 오탐 전제 자체를 재검토(오탐 방지):
+ *   - 지금까지는 curl/wget 실행 자체를 목적지와 무관하게 즉시 이상
  *     행위로 간주했다. 그러나 실제 AI 서빙 워크로드에서는 워커가 모델
  *     가중치·데이터셋을 curl/wget으로 내려받는 것이 정상적인 운영이다
  *     — 즉 "curl을 실행했는가"는 이상 행위의 신호가 아니고, "curl이
@@ -74,7 +72,7 @@
  *     재활용한 것이다. nc/ncat은 AI 워커 계보에서 합법적 용도가 사실상
  *     없어(리버스/바인드 셸 목적이 대부분) exec 즉시 차단을 유지한다.
  *
- * v13 재검토 (실제 Ray 클러스터 검증 중 발견): 실제 Ray 클러스터를 이
+ * 7차 재검토 (실제 Ray 클러스터 검증 중 발견): 실제 Ray 클러스터를 이
  * 도구로 보호하려는 첫 시도에서, raylet 자신이 GCS로 접속할 때 IPv4가
  * 아니라 IPv4-mapped IPv6 주소(::ffff:a.b.c.d)로 먼저 연결을 시도하는
  * 경우가 있음을 실측으로 발견하였다. trace_shadow_connect_v6는 애초에
@@ -98,7 +96,7 @@ char LICENSE[] SEC("license") = "GPL";
 #define EVT_SHADOW_EXEC    1
 #define EVT_SHADOW_CONNECT 2
 
-/* v10 재검토: watched_parents[]/watched_self[]/suspicious_bins[]도
+/* 4차 재검토: watched_parents[]/watched_self[]/suspicious_bins[]도
  * trusted_dst_ipv4[]와 같은 이유로 rodata 배열에서 BPF map으로 전환한다
  * — 새 CVE 대응이나 감시 대상 프레임워크 변경(예: Ray -> Triton) 때마다
  * 재컴파일이 필요했던 문제를 해소한다. `kshield_ctl`의
@@ -106,7 +104,7 @@ char LICENSE[] SEC("license") = "GPL";
  * bin-add/bin-del/bin-list가 런타임에 관리한다. key는 문자열을
  * MAX_COMM_LEN(또는 MAX_PATH_LEN) 바이트로 고정한 배열이며, 짧은 문자열은
  * 뒤쪽이 0으로 채워진다 — comm/filename을 읽는 모든 코드가 이미 고정
- * 크기 버퍼를 0으로 초기화한 뒤 채우므로(v6 이전부터의 기존 관례),
+ * 크기 버퍼를 0으로 초기화한 뒤 채우므로(초기 설계부터의 기존 관례),
  * 맵 키와 정확히 같은 바이트 배열이 만들어진다.
  *
  * 로더(kshield_vpatch.c)는 맵이 처음 생성될 때만(핀 경로가 아직 없을 때)
@@ -134,7 +132,7 @@ struct {
     __type(value, __u8);
 } suspicious_bins_map SEC(".maps");
 
-/* v8 재검토: 신뢰 목적지 IP를 rodata 배열이 아닌 BPF map으로 관리한다.
+/* 2차 재검토: 신뢰 목적지 IP를 rodata 배열이 아닌 BPF map으로 관리한다.
  * 클라우드 스토리지(S3, HuggingFace 등)처럼 실제 운영에서 자주 바뀌는
  * 목적지를 컴파일 타임 상수로 두면, IP 하나 추가할 때마다 재컴파일·
  * 재배포가 필요해 운영팀이 이 도구를 도입할 유인이 없어진다는 지적을
@@ -151,7 +149,7 @@ struct {
     __type(value, __u8);
 } trusted_dst_ipv4_map SEC(".maps");
 
-/* v5: audit-only(감사 전용) 모드. WAF 업계의 표준 관행 — 신규 룰은 먼저
+/* audit-only(감사 전용) 모드. WAF 업계의 표준 관행 — 신규 룰은 먼저
  * "감지만 하고 차단은 안 함"으로 배포해 오탐을 관찰한 뒤에야 실제 차단으로
  * 전환한다 — 을 반영한다. 1(기본값)이면 기존과 동일하게 탐지 즉시
  * SIGKILL하고, 0이면 이벤트만 perf buffer로 기록하고 SIGKILL은 건너뛴다.
@@ -187,7 +185,7 @@ struct {
     __type(value, __u8);
 } ai_worker_lineage SEC(".maps");
 
-/* v9: 특정 UID를 감시에서 완전히 제외하는 예외 목록. GPU를 오래 점유하는
+/* 3차: 특정 UID를 감시에서 완전히 제외하는 예외 목록. GPU를 오래 점유하는
  * 학습·추론 job을 오탐으로 SIGKILL했을 때의 비용(수천 달러 규모의 GPU
  * 시간 손실)이 매우 크다는 지적을 반영해, 검증된 사용자(UID) 단위로
  * 감시 자체를 건너뛸 수 있게 한다. key=UID, value=1(예외 처리됨).
@@ -199,7 +197,7 @@ struct {
     __type(value, __u8);
 } exempt_uids_map SEC(".maps");
 
-/* v10: exempt_uids_map(UID 단위)에 더해 cgroup 단위 예외도 지원한다.
+/* 4차: exempt_uids_map(UID 단위)에 더해 cgroup 단위 예외도 지원한다.
  * 쿠버네티스 "네임스페이스" 자체는 커널이 아는 개념이 아니라 K8s API
  * 서버가 관리하는 논리적 그룹이라 eBPF에서 직접 관측할 수 없다 — 그러나
  * 컨테이너/파드 하나하나는 보통 자신만의 cgroup을 가지므로,
@@ -263,17 +261,17 @@ static __always_inline int is_watched_self(const char *comm)
  * (예: BPF 프로그램이 fork 이후·exec 이전에 로드된 경우 대비) 계보로
  * 간주한다. parent_comm_out에 직속 부모 comm을 채워 반환한다.
  *
- * v6: 위 두 조건 다 "자손"만 커버한다는 공백이 있었다 — 감시 대상
+ * 위 두 조건 다 "자손"만 커버한다는 공백이 있었다 — 감시 대상
  * 프로세스 자신(watched_self[])이 fork 없이 직접 execve()/connect()를
  * 호출하면 어느 조건도 참이 되지 않아 놓치는 문제가 있었다. 세 번째
  * 조건으로 "내 자신의 comm이 watched_self[]와 일치하는가"를 추가하여
  * 이를 해소한다.
  *
- * v9: exempt_uids_map에 있는 UID는 다른 조건과 무관하게 항상 감시 대상이
+ * 3차: exempt_uids_map에 있는 UID는 다른 조건과 무관하게 항상 감시 대상이
  * 아닌 것으로 처리한다(최우선 확인) — 오탐 시 비용이 큰 job을 실행하는
  * 검증된 사용자를 계보/자기자신 판정보다 먼저 완전히 제외시키기 위함.
  *
- * v10: exempt_cgroups_map도 동일하게 최우선 확인한다 — UID보다 더 세밀한
+ * 4차: exempt_cgroups_map도 동일하게 최우선 확인한다 — UID보다 더 세밀한
  * 컨테이너/파드 단위 예외가 필요한 경우를 위함. */
 static __always_inline int current_is_watched(char (*parent_comm_out)[MAX_COMM_LEN])
 {
@@ -344,7 +342,7 @@ int trace_lineage_exit(void *ctx)
     return 0;
 }
 
-/* v12 재검토: watched_self[]가 fork 없는 self-exec 치환(예: bash -c
+/* 6차 재검토: watched_self[]가 fork 없는 self-exec 치환(예: bash -c
  * '<단일 명령>'이 자기 자신을 execve()로 다른 바이너리로 치환하는
  * 최적화)을 놓치는 문제를 3.11절 재측정 중 발견하였다.
  * tp/sched/sched_process_exec는 execve() 완료 *이후*에 발동하므로, 그
@@ -508,7 +506,7 @@ int BPF_KPROBE(trace_shadow_connect_v6, struct sock *sk, struct sockaddr *uaddr,
     if (is_v6_loopback)
         return 0;
 
-    /* v13 재검토: 실제 Ray 클러스터 검증 중, dual-stack 애플리케이션(Ray의
+    /* 7차 재검토: 실제 Ray 클러스터 검증 중, dual-stack 애플리케이션(Ray의
      * gRPC 클라이언트)이 신뢰 목적지 IP(예: GCS 서버 자신의 IP)로 접속할
      * 때도 IPv4-mapped IPv6 주소(::ffff:a.b.c.d, ::ffff:0:0/96 대역)로
      * 먼저 시도하는 경우가 실측으로 확인되었다 — 이 경로는 신뢰 목록
