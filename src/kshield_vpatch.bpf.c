@@ -445,6 +445,14 @@ int BPF_KPROBE(trace_shadow_connect_v4, struct sock *sk, struct sockaddr *uaddr,
 
     __u32 dst_addr = bpf_ntohl(dst_addr_be);
 
+    /* TEMP DEBUG: 0.0.0.0 신뢰 등록 미스터리 진단용. bpftool prog tracelog로 확인 후 제거할 것. */
+    {
+        __u32 dbg_pid = bpf_get_current_pid_tgid() >> 32;
+        int dbg_trusted = is_loopback_or_trusted(dst_addr);
+        bpf_printk("KSHIELD_DBG pid=%d dst_addr_raw=%u dst_port_be=%d trusted=%d\n",
+                   dbg_pid, dst_addr, dst_port_be, dbg_trusted);
+    }
+
     if (is_loopback_or_trusted(dst_addr))
         return 0;
 
@@ -494,6 +502,14 @@ int BPF_KPROBE(trace_shadow_connect_v6, struct sock *sk, struct sockaddr *uaddr,
     }
     if (is_v6_loopback && addr6.in6_u.u6_addr8[15] != 1)
         is_v6_loopback = 0;
+
+    /* TEMP DEBUG: 0.0.0.0 신뢰 등록 미스터리 진단용. 확인 후 제거할 것. */
+    {
+        __u32 dbg_pid = bpf_get_current_pid_tgid() >> 32;
+        __u32 last4 = ((__u32)addr6.in6_u.u6_addr8[12] << 24) | ((__u32)addr6.in6_u.u6_addr8[13] << 16) |
+                      ((__u32)addr6.in6_u.u6_addr8[14] << 8) | (__u32)addr6.in6_u.u6_addr8[15];
+        bpf_printk("KSHIELD_DBG_V6 pid=%d loopback=%d last4_hex=%x\n", dbg_pid, is_v6_loopback, last4);
+    }
 
     if (is_v6_loopback)
         return 0;
