@@ -46,6 +46,16 @@
  *      저장소의 어떤 코드도 부팅 설정을 자동으로 바꾸지 않는다.)
  *   attach 실패 시 사용자 공간 로더(kshield_vpatch_lsm.c)가 원인을
  *   진단할 수 있는 메시지를 출력하도록 작성되어 있다.
+ *
+ * v13-lsm 재검토 (실제 Ray 클러스터 검증 중 발견): 위 "검증 완료"는 mock
+ * 서버 기준이었고, 실제 Ray 클러스터에 이 LSM 컴포넌트를 처음 붙여본
+ * 결과 kshield_vpatch.bpf.c에서 v13으로 고쳤던 것과 동일한 IPv4-mapped
+ * IPv6 신뢰 우회 문제가 이 파일의 kshield_lsm_socket_connect에도 그대로
+ * 있었다 — 새로 뜨는 워커가 GCS로 접속할 때 IPv4-mapped 주소를 쓰면
+ * 신뢰 목록 확인 없이 무조건 -EPERM으로 막혀, job이 전부 PENDING에
+ * 멈추는 것으로 재현되었다. 해당 함수에 동일한 방식(뒤 4바이트를 꺼내
+ * trusted_dst_ipv4_map으로 재판정)으로 보강하였다 — 자세한 내용은 그
+ * 함수의 주석 참고.
  */
 #include "vmlinux.h"
 #include <bpf/bpf_helpers.h>
@@ -350,8 +360,37 @@ int BPF_PROG(kshield_lsm_socket_connect, struct socket *sock, struct sockaddr *a
         if (is_v6_loopback)
             return 0;
 
-        /* TODO(향후 연구): 메인 구현과 동일하게 IPv6 trusted 목록은
-         * 아직 없다. loopback 외 모든 v6 목적지를 의심으로 간주한다. */
+        /* v13-lsm 재검토: 실제 Ray 클러스터에 이 LSM 컴포넌트를 붙여
+         * 검증하던 중, kshield_vpatch.bpf.c의 trace_shadow_connect_v6와
+         * 완전히 동일한 문제를 발견하였다 — Ray의 gRPC 클라이언트가 신뢰
+         * 목적지 IP(GCS 서버 자신의 IP)로도 IPv4-mapped IPv6 주소
+         * (::ffff:a.b.c.d)로 먼저 접속을 시도하는데, 이 분기는 신뢰 목록
+         * 확인 없이 무조건 -EPERM을 반환해 새로 뜨는 워커가 GCS에 연결하지
+         * 못하고 job이 전부 PENDING에 멈추는 것으로 나타났다(dst=0.0.0.0
+         * 으로 로그가 찍히는 것도 메인 구현과 동일한 이유 — 이 v6 이벤트가
+         * evt.dst_addr을 채우지 않기 때문). trace_shadow_connect_v6와
+         * 동일한 방식으로, 뒤 4바이트의 실제 IPv4 주소를 꺼내 기존
+         * trusted_dst_ipv4_map으로 재판정한다. */
+        int is_v4_mapped = 1;
+        for (int i = 0; i < 10; i++) {
+            if (addr6.in6_u.u6_addr8[i] != 0) { is_v4_mapped = 0; break; }
+        }
+        if (is_v4_mapped &&
+            (addr6.in6_u.u6_addr8[10] != 0xff || addr6.in6_u.u6_addr8[11] != 0xff))
+            is_v4_mapped = 0;
+
+        if (is_v4_mapped) {
+            __u32 mapped_v4 = ((__u32)addr6.in6_u.u6_addr8[12] << 24) |
+                               ((__u32)addr6.in6_u.u6_addr8[13] << 16) |
+                               ((__u32)addr6.in6_u.u6_addr8[14] << 8) |
+                               (__u32)addr6.in6_u.u6_addr8[15];
+            if (is_loopback_or_trusted(mapped_v4))
+                return 0;
+        }
+
+        /* TODO(향후 연구): 메인 구현과 동일하게 순수 IPv6 목적지용 신뢰
+         * 목록은 여전히 없다. loopback과 IPv4-mapped-후-신뢰됨 두 경우를
+         * 제외한 모든 v6 목적지를 의심으로 간주한다. */
 
         struct shadow_event evt = {};
         evt.type     = EVT_LSM_CONNECT_BLOCK;
