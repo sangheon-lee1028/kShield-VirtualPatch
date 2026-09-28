@@ -80,7 +80,12 @@ tracepoint:syscalls:sys_exit_connect
 kprobe:do_exit
 / @exec_ok[pid] || @conn_ok[pid] /
 {
-    $code = curtask->exit_code;
+    /* do_exit(long code)의 code는 함수 본문 맨 앞에서 tsk->exit_code에
+     * 대입된다. kprobe는 본문 실행 전(함수 진입)에 걸리므로
+     * curtask->exit_code를 읽으면 아직 갱신 전의 옛 값(대개 0)을 읽게
+     * 되어 SIGKILL로 죽였어도 항상 sig=0으로 잘못 찍힌다 — 인자 레지스터
+     * (arg0)를 직접 읽어야 이번 종료의 실제 code다. */
+    $code = arg0;
     $sig = $code & 0x7f;
     if (@exec_ok[pid]) {
         $delta = nsecs - @exec_ok[pid];
