@@ -233,6 +233,11 @@ class Tool:
     """off(도구 없음) 베이스라인. 다른 도구의 부모 클래스."""
     name = "off"
     markers = []
+    # restart-gap 전용: 이 도구가 실제로 막는(kill/거부) 도구면 공격 자신의 종료
+    # 코드 집합을 적는다(예: SIGKILL=137). None이면 "막지 않고 탐지만 하는" 도구
+    # (Falco)라는 뜻이며, 그때는 로그 마커로 판정한다 — 막는 도구를 로그로
+    # 판정하면 안 되는 이유는 restart_gap 실험 자체의 docstring 참고.
+    blocked_rc = None
 
     def __init__(self, args, logdir, capture_events=False):
         self.args = args
@@ -317,6 +322,7 @@ class KShield(Tool):
     markers = ["SHADOW_CONNECT 탐지", "SHADOW_EXEC 탐지"]
     bin_path = KSHIELD_BIN
     logname = "kshield.log"
+    blocked_rc = {137}  # 비동기 kprobe SIGKILL
 
     def _spawn_self(self):
         if not os.access(self.bin_path, os.X_OK):
@@ -342,6 +348,7 @@ class KShieldLSM(KShield):
     markers = ["LSM_CONNECT_BLOCK 탐지", "LSM_EXEC_BLOCK 탐지"]
     bin_path = KSHIELD_LSM_BIN
     logname = "kshield_lsm.log"
+    blocked_rc = {126}  # 동기 -EPERM(exec 자체 실패, bash의 "cannot execute" 관례)
 
 
 class Falco(Tool):
@@ -399,6 +406,7 @@ class Tetragon(Tool):
     markers = [TETRAGON_POLICY_NAME]
     policy_path = TETRAGON_POLICY
     policy_name = TETRAGON_POLICY_NAME
+    blocked_rc = {137}  # connect 단계에서 SIGKILL(4.5절)
 
     def __init__(self, *a, **kw):
         super().__init__(*a, **kw)
@@ -1068,15 +1076,23 @@ def cmd_latency(args):
 
 
 # ── restart-gap ───────────────────────────────────────────────────────────
-RESTART_GAP_FIELDS = ["group", "trial", "gap_s", "timed_out", "attempts"]
+RESTART_GAP_FIELDS = ["group", "trial", "gap_s", "timed_out", "attempts", "readout"]
 
 
 def cmd_restart_gap(args):
     """3.9절·4.6.1절이 각각 kShield/Tetragon(정성적 확인)과 Falco(N=1)로 따로
     보였던 '데몬을 kill -9로 죽이고 재기동하는 동안 실제로 몇 초나 무방비인가'를
-    같은 방법론으로 N회 반복 측정한다. 판정 기준은 도구 자신의 로그에 markers가
-    다시 찍히는 시점이다 — Falco는 탐지만 하고 막지는 않으므로(4.5절), Sink 수립
-    여부가 아니라 로그를 기준으로 삼아야 kShield/Tetragon과 같은 잣대가 된다."""
+    같은 방법론으로 N회 반복 측정한다.
+
+    판정 기준은 도구에 따라 다르다(blocked_rc 클래스 속성으로 구분) — 실제로
+    막는 도구(kshield/kshield_lsm/tetragon)는 공격 자신의 종료 코드(SIGKILL=137,
+    LSM -EPERM=126)로 판정하고, 탐지만 하고 막지는 않는 도구(Falco, 4.5절)만
+    로그 마커로 판정한다. 막는 도구를 로그로 판정하면 안 되는 이유: kShield는
+    3.9절에서 커널에 핀된 BPF 프로그램이 데몬 생사와 무관하게 계속 SIGKILL을
+    보낼 수 있음을 보였는데, 그 SIGKILL 이벤트를 로그로 남기는 건 유저스페이스
+    데몬이다 — 데몬이 죽어 있는 동안엔 커널이 계속 막고 있어도 그걸 기록할
+    프로세스가 없어 로그가 비어 있다. 로그 기준으로 재면 "실제 무방비 시간"이
+    아니라 "데몬이 다시 떠서 로그를 찍기 시작하는 시간"을 재게 된다."""
     require_root()
     groups = [g for g in parse_groups(args) if g != "off"]
     if not groups:
@@ -1107,13 +1123,30 @@ def cmd_restart_gap(args):
         f"| gap-timeout {args.gap_timeout}s")
 
     def probe_once():
-        """공격 한 번 제출하고 완료까지 기다린다. 반환값은 없다 — 판정은 호출부가
-        도구 로그로 한다(Falco는 차단이 아니라 탐지만 하므로)."""
+        """공격 한 번 제출하고 완료까지 기다린 뒤, entrypoint 자신의 종료 코드를
+        반환한다(못 읽었으면 None)."""
         resfile = f"/tmp/kcmp_gap_{os.getpid()}_{int(time.time() * 1000)}.res"
         submit_job(args.host, args.port, f"{attack_cmd}; echo rc=$? > {resfile}")
         wait_result(resfile, args.probe_timeout)
+        rc = None
         if os.path.exists(resfile):
+            try:
+                with open(resfile) as f:
+                    s = f.read().strip()
+                if s.startswith("rc="):
+                    rc = int(s[3:])
+            except (OSError, ValueError):
+                pass
             os.remove(resfile)
+        return rc
+
+    def is_blocked(tool, offset, rc):
+        if tool.blocked_rc is not None:
+            return rc in tool.blocked_rc
+        return any(m in tool.read_log_from(offset) for m in tool.markers)
+
+    def readout_name(tool):
+        return "exit_code" if tool.blocked_rc is not None else "log_marker"
 
     try:
         for group in groups:
@@ -1124,11 +1157,18 @@ def cmd_restart_gap(args):
                 tool.start()
                 server = start_server(args, logdir)
 
-                offset = tool.log_size()
-                probe_once()
-                time.sleep(0.5)
-                if not any(m in tool.read_log_from(offset) for m in tool.markers):
-                    log(f"  [경고] 기준 공격이 탐지되지 않아 이 그룹은 건너뜁니다.\n{tool.tail()}")
+                baseline_ok = False
+                for attempt in range(1, 4):
+                    offset = tool.log_size()
+                    rc = probe_once()
+                    time.sleep(args.settle)
+                    if is_blocked(tool, offset, rc):
+                        baseline_ok = True
+                        break
+                    log(f"  [기준 확인 {attempt}/3 실패, rc={rc}] 재시도...")
+                if not baseline_ok:
+                    log(f"  [경고] 기준 공격이 {readout_name(tool)} 기준으로 3회 모두 "
+                        f"확인되지 않아 이 그룹은 건너뜁니다.\n{tool.tail()}")
                     continue
 
                 for trial in range(1, args.repeats + 1):
@@ -1152,9 +1192,8 @@ def cmd_restart_gap(args):
                     while time.monotonic() < deadline:
                         attempts += 1
                         offset = tool.log_size()
-                        probe_once()
-                        new = tool.read_log_from(offset)
-                        if any(m in new for m in tool.markers):
+                        rc = probe_once()
+                        if is_blocked(tool, offset, rc):
                             detected_at = time.monotonic()
                             break
                         time.sleep(args.poll_interval)
@@ -1162,9 +1201,10 @@ def cmd_restart_gap(args):
                     gap = (detected_at - t0) if detected_at else None
                     rows.append({"group": group, "trial": trial,
                                  "gap_s": "" if gap is None else round(gap, 3),
-                                 "timed_out": int(gap is None), "attempts": attempts})
+                                 "timed_out": int(gap is None), "attempts": attempts,
+                                 "readout": readout_name(tool)})
                     gap_str = f"TIMEOUT(>{args.gap_timeout}s)" if gap is None else f"{gap:.3f}s"
-                    log(f"  trial {trial:>2}: {gap_str}  ({attempts}회 시도)")
+                    log(f"  trial {trial:>2}: {gap_str}  ({attempts}회 시도, {readout_name(tool)})")
                     time.sleep(args.cooldown)
             finally:
                 stop_server(server)
@@ -1184,20 +1224,28 @@ def cmd_restart_gap(args):
 
     log(f"\n원시 결과: {out_path}\n메타데이터: {meta_path}")
     for group in groups:
-        vals = [r["gap_s"] for r in rows if r["group"] == group and r["gap_s"] != ""]
-        n_timeout = sum(1 for r in rows if r["group"] == group and r["timed_out"])
+        group_rows = [r for r in rows if r["group"] == group]
+        if not group_rows:
+            log(f"{group:<14}: 건너뜀 — 기준 공격 확인 3회 모두 실패(위 경고 참고). "
+                "타임아웃이 아니라 아예 시도되지 않은 것이다.")
+            continue
+        vals = [r["gap_s"] for r in group_rows if r["gap_s"] != ""]
+        n_timeout = sum(1 for r in group_rows if r["timed_out"])
+        readout = group_rows[0]["readout"]
         if vals:
             mean = sum(vals) / len(vals)
             sd = (sum((v - mean) ** 2 for v in vals) / (len(vals) - 1)) ** 0.5 if len(vals) > 1 else 0.0
-            log(f"{group:<14}: N={len(vals)} 평균 {mean:.3f}s ± {sd:.3f}s"
+            log(f"{group:<14}: N={len(vals)} 평균 {mean:.3f}s ± {sd:.3f}s  [{readout}]"
                 + (f"  (타임아웃 {n_timeout}건 별도)" if n_timeout else ""))
         else:
-            log(f"{group:<14}: 전부 타임아웃({n_timeout}건) — 이 그룹은 gap-timeout 안에 재탐지되지 않았습니다.")
-    log("\n해석: gap_s는 kill -9 시점부터 도구 로그에 markers가 다시 찍히기까지의 시간이다. "
+            log(f"{group:<14}: N={len(group_rows)} 전부 타임아웃  [{readout}] — "
+                f"gap-timeout({args.gap_timeout}s) 안에 재탐지되지 않았습니다.")
+    log("\n해석: gap_s는 kill -9 시점부터 재탐지 시점까지의 시간이다. blocked_rc가 있는 "
+        "도구(kshield/kshield_lsm/tetragon)는 공격 자신의 종료 코드(exit_code)로, 탐지만 하고 "
+        "막지는 않는 Falco는 로그 마커(log_marker)로 판정한다 — readout 열이 어느 쪽인지 보여준다. "
         "Tetragon은 커널 BPF 프로그램이 데몬 생사와 무관하게 유지될 수 있다는 것이 3.9절의 발견이므로, "
         "gap_s가 작더라도 그게 '데몬이 빨리 재시작돼서'인지 '애초에 커널 집행이 끊긴 적이 없어서'인지는 "
-        "이 실험만으로 구분되지 않는다 — 이벤트 스트림(tetra getevents) 재연결 지연이 실제 집행 지연으로 "
-        "잘못 잡힐 수 있다는 뜻이다.")
+        "exit_code 기준으로도 완전히 구분되지 않는다 — 다만 로그 기준보다는 실제 집행에 훨씬 가까운 값이다.")
 
 
 def parse_groups(args):
@@ -1258,6 +1306,8 @@ def build_parser():
     rg.add_argument("--gap-timeout", type=float, default=15.0,
                     help="이 시간 안에 재탐지되지 않으면 타임아웃으로 기록(초)")
     rg.add_argument("--probe-timeout", type=float, default=5.0, help="공격 1회 완료 대기(초)")
+    rg.add_argument("--settle", type=float, default=1.5,
+                    help="기준 공격 확인 시 로그 반영 대기(초) — detect와 동일 기본값")
     return p
 
 
