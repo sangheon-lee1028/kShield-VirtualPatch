@@ -1168,7 +1168,13 @@ def cmd_restart_gap(args):
     try:
         for group in groups:
             log(f"\n=== [재시작 무방비 구간] {group} ===")
-            tool = make_tool(group, args, logdir, capture_events=group.startswith("tetragon"))
+            # capture_events=False: 이 실험은 blocked_rc가 있는 도구를 공격 자신의
+            # 종료 코드로 판정하고(Tetragon 포함), 없는 도구(Falco)만 자신의 표준
+            # 로그로 판정한다 — 어느 쪽도 tetra 이벤트 스트림(tetra getevents)을
+            # 읽지 않으므로, 그걸 붙였다 뗐다 하는 절차 자체가 순수한 측정 오버헤드다.
+            # 꺼두면 respawn_fast()가 systemd MainPID 변화 + 정책 재적재만 기다리게
+            # 되어 Tetragon 쪽 gap이 실제 재시작 시간에 더 가까워진다.
+            tool = make_tool(group, args, logdir, capture_events=False)
             try:
                 tool.start()
 
