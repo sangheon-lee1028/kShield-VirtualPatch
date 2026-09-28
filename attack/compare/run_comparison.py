@@ -12,10 +12,14 @@ run_comparison.py — kShield-VirtualPatch vs Falco vs Tetragon 비교 실험 �
            kShield-LSM(동기 -EPERM)의 공격 윈도 길이 차이를 재는 게 1차
            목적이며, falco/tetragon도 같은 그룹 목록에 넣으면 잰다
            (결과: attack/results/latency_raw_*.csv)
-  restart-gap  도구를 kill -9로 죽이고 즉시 재기동하는 동안, 도구 자신의
-           로그에 markers가 다시 찍히기까지 몇 초나 걸리는지 N회 반복
-           측정한다 — 3.9절(kShield/Tetragon, 정성적)·4.6.1절(Falco, N=1)
-           을 같은 방법론으로 통일해 재본다 (결과: attack/results/restart_gap_raw_*.csv)
+  restart-gap  도구를 kill -9로 죽이고 즉시 재기동하는 동안, 재탐지(막는
+           도구는 공격 종료 코드, Falco는 로그 마커)까지 몇 초나 걸리는지
+           N회 반복 측정한다 — 3.9절(kShield/Tetragon, 정성적)·4.6.1절
+           (Falco, N=1)을 같은 방법론으로 통일해 재본다. mock 서버/HTTP는
+           거치지 않고 watched_self[] 매칭으로 직접 fork+exec한다 — 첫
+           버전은 HTTP job 제출 경로를 썼다가 그 경로 자체의 지연을
+           kShield의 진짜 gap(0.003~0.005초)과 혼동해 3.1초로 잘못
+           보고했었다 (결과: attack/results/restart_gap_raw_*.csv)
 
 반드시 root로 실행한다.
     sudo python3 attack/compare/run_comparison.py check
@@ -130,7 +134,12 @@ def chown_tree(path):
 
 
 def pgrep(name):
-    r = run(["pgrep", "-x", name])
+    # 리눅스 comm은 TASK_COMM_LEN-1=15자까지만 저장한다. "kshield_vpatch_lsm"(18자)
+    # 같은 이름은 커널이 "kshield_vpatch_"로 잘라서 저장하므로, pgrep -x에 원래
+    # 이름을 그대로 넘기면 절대 안 걸린다 — 실제로 이 때문에 고아 상태의
+    # kshield_vpatch_lsm 데몬이 이틀 넘게 ensure_clean()을 매번 통과해 여러 실험을
+    # 오염시켰다(2026-09-28 발견). 커널과 동일하게 15자로 잘라서 비교해야 한다.
+    r = run(["pgrep", "-x", name[:15]])
     return [int(x) for x in r.stdout.split()] if r.returncode == 0 else []
 
 
@@ -1077,12 +1086,22 @@ def cmd_latency(args):
 
 # ── restart-gap ───────────────────────────────────────────────────────────
 RESTART_GAP_FIELDS = ["group", "trial", "gap_s", "timed_out", "attempts", "readout"]
+RESTART_GAP_ATTACKER = "/tmp/kshield_restart_gap_raylet"
 
 
 def cmd_restart_gap(args):
     """3.9절·4.6.1절이 각각 kShield/Tetragon(정성적 확인)과 Falco(N=1)로 따로
     보였던 '데몬을 kill -9로 죽이고 재기동하는 동안 실제로 몇 초나 무방비인가'를
     같은 방법론으로 N회 반복 측정한다.
+
+    공격은 mock Ray Jobs API를 거치지 않고, watched_self[] 기본값("raylet")과
+    정확히 일치하는 이름으로 복사한 바이너리를 직접 실행한다(§3.6/3.9와 동일한
+    기법). 첫 버전은 HTTP job 제출 → mock 서버 → 셸 생성이라는 무거운 경로를
+    썼는데, 이 경로 자체의 지연(수동 진단으로 확인: kShield의 진짜 gap은
+    0.003~0.005초인데 이 경로로는 3.112초로 잘못 측정됨 — 원인은 이 경로의
+    지연이 데몬 재기동 지연과 뒤섞였기 때문)이 측정하려는 커널 레벨 gap보다
+    훨씬 커서, 재는 대상이 사실상 "job 제출 경로 자체의 오버헤드"로 바뀌어
+    버렸다. 이번 버전은 그 경로를 완전히 걷어내고 공격을 직접 fork+exec한다.
 
     판정 기준은 도구에 따라 다르다(blocked_rc 클래스 속성으로 구분) — 실제로
     막는 도구(kshield/kshield_lsm/tetragon)는 공격 자신의 종료 코드(SIGKILL=137,
@@ -1099,9 +1118,10 @@ def cmd_restart_gap(args):
         die("off 그룹은 재시작이 없어 이 실험 대상이 아닙니다. --groups로 지정하세요 "
             "(예: --groups kshield,falco,tetragon).")
     ip = resolve_untrusted_ip(args)
-    scenarios = build_scenarios(ip, args.untrusted_port)
-    attack_cmd = next(c for n, c, atk in scenarios if n == "nc_untrusted")
     preflight(args, groups)
+
+    shutil.copyfile("/bin/bash", RESTART_GAP_ATTACKER)
+    os.chmod(RESTART_GAP_ATTACKER, 0o755)
 
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     os.makedirs(RESULTS_DIR, exist_ok=True)
@@ -1111,6 +1131,7 @@ def cmd_restart_gap(args):
     meta_path = os.path.join(RESULTS_DIR, f"restart_gap_meta_{ts}.json")
     meta = collect_meta(args, groups)
     meta["untrusted_dest"] = f"{ip}:{args.untrusted_port}"
+    meta["attacker_binary"] = RESTART_GAP_ATTACKER
     with open(meta_path, "w", encoding="utf-8") as f:
         json.dump(meta, f, ensure_ascii=False, indent=2)
 
@@ -1119,26 +1140,22 @@ def cmd_restart_gap(args):
         sink = Sink(ip, args.untrusted_port)
     except OSError as e:
         die(f"Sink를 {ip}:{args.untrusted_port} 에 열지 못했습니다: {e}")
-    log(f"신뢰되지 않은 목적지(Sink): {ip}:{args.untrusted_port} | 그룹당 {args.repeats}회 "
-        f"| gap-timeout {args.gap_timeout}s")
+    log(f"신뢰되지 않은 목적지(Sink): {ip}:{args.untrusted_port} | "
+        f"공격자={RESTART_GAP_ATTACKER}(comm=raylet, watched_self[] 직접 매칭, mock 서버 안 거침) "
+        f"| 그룹당 {args.repeats}회 | gap-timeout {args.gap_timeout}s")
 
     def probe_once():
-        """공격 한 번 제출하고 완료까지 기다린 뒤, entrypoint 자신의 종료 코드를
-        반환한다(못 읽었으면 None)."""
-        resfile = f"/tmp/kcmp_gap_{os.getpid()}_{int(time.time() * 1000)}.res"
-        submit_job(args.host, args.port, f"{attack_cmd}; echo rc=$? > {resfile}")
-        wait_result(resfile, args.probe_timeout)
-        rc = None
-        if os.path.exists(resfile):
-            try:
-                with open(resfile) as f:
-                    s = f.read().strip()
-                if s.startswith("rc="):
-                    rc = int(s[3:])
-            except (OSError, ValueError):
-                pass
-            os.remove(resfile)
-        return rc
+        """watched_self[]에 등록된 이름(raylet)으로 직접 nc를 실행해 종료 코드를
+        바로 받는다. 반환값은 정수 종료 코드(못 읽었으면 None)."""
+        try:
+            r = subprocess.run(
+                [RESTART_GAP_ATTACKER, "-c",
+                 f"nc -w 2 {ip} {args.untrusted_port} < /dev/null; echo rc=$?"],
+                capture_output=True, text=True, timeout=args.probe_timeout)
+        except subprocess.TimeoutExpired:
+            return None
+        m = re.search(r"rc=(-?\d+)", r.stdout)
+        return int(m.group(1)) if m else None
 
     def is_blocked(tool, offset, rc):
         if tool.blocked_rc is not None:
@@ -1152,10 +1169,8 @@ def cmd_restart_gap(args):
         for group in groups:
             log(f"\n=== [재시작 무방비 구간] {group} ===")
             tool = make_tool(group, args, logdir, capture_events=group.startswith("tetragon"))
-            server = None
             try:
                 tool.start()
-                server = start_server(args, logdir)
 
                 baseline_ok = False
                 for attempt in range(1, 4):
@@ -1176,15 +1191,22 @@ def cmd_restart_gap(args):
                         die(f"{group}: 트라이얼 {trial} 시작 전 도구가 이미 죽어 있습니다.\n{tool.tail()}")
                     t0 = time.monotonic()
                     tool.crash()
-                    old_pid = tool.pid()
-                    end_wait = time.time() + 3
-                    while time.time() < end_wait and old_pid:
+                    t_crash = time.monotonic()
+                    # os.kill(pid, 0)로 "사라졌는지"를 폴링하면 안 된다 — 부모(이 스크립트)가
+                    # 거두지(reap) 않은 자식은 죽은 뒤에도 좀비로 PID를 계속 차지해 존재
+                    # 확인에 항상 "있음"으로 응답하므로, 매번 타임아웃(예전엔 3초)을 그냥
+                    # 날리게 된다. Popen.wait()는 실제로 거두면서 커널이 정리를 끝내는
+                    # 즉시(보통 수 ms) 반환한다. Tetragon은 systemd가 부모라 self.proc가
+                    # 없으므로 해당 없음 — respawn_fast() 자체가 MainPID 변화를 기다린다.
+                    wait_timed_out = False
+                    if tool.proc is not None:
                         try:
-                            os.kill(old_pid, 0)
-                            time.sleep(0.05)
-                        except (ProcessLookupError, PermissionError):
-                            break
+                            tool.proc.wait(timeout=3)
+                        except subprocess.TimeoutExpired:
+                            wait_timed_out = True
+                    t_wait = time.monotonic()
                     tool.respawn_fast()
+                    t_respawn = time.monotonic()
 
                     detected_at = None
                     attempts = 0
@@ -1198,6 +1220,13 @@ def cmd_restart_gap(args):
                             break
                         time.sleep(args.poll_interval)
 
+                    if trial <= 3:
+                        t_end = detected_at or time.monotonic()
+                        log(f"    [진단] crash={t_crash - t0:.3f}s "
+                            f"wait={t_wait - t_crash:.3f}s(timeout={wait_timed_out}) "
+                            f"respawn={t_respawn - t_wait:.3f}s "
+                            f"probe={t_end - t_respawn:.3f}s(last rc={rc})")
+
                     gap = (detected_at - t0) if detected_at else None
                     rows.append({"group": group, "trial": trial,
                                  "gap_s": "" if gap is None else round(gap, 3),
@@ -1207,11 +1236,12 @@ def cmd_restart_gap(args):
                     log(f"  trial {trial:>2}: {gap_str}  ({attempts}회 시도, {readout_name(tool)})")
                     time.sleep(args.cooldown)
             finally:
-                stop_server(server)
                 tool.stop()
                 time.sleep(args.cooldown)
     finally:
         sink.close()
+        if os.path.exists(RESTART_GAP_ATTACKER):
+            os.remove(RESTART_GAP_ATTACKER)
         if rows:
             with open(out_path, "w", newline="", encoding="utf-8") as f:
                 w = csv.DictWriter(f, fieldnames=RESTART_GAP_FIELDS)
@@ -1243,9 +1273,13 @@ def cmd_restart_gap(args):
     log("\n해석: gap_s는 kill -9 시점부터 재탐지 시점까지의 시간이다. blocked_rc가 있는 "
         "도구(kshield/kshield_lsm/tetragon)는 공격 자신의 종료 코드(exit_code)로, 탐지만 하고 "
         "막지는 않는 Falco는 로그 마커(log_marker)로 판정한다 — readout 열이 어느 쪽인지 보여준다. "
-        "Tetragon은 커널 BPF 프로그램이 데몬 생사와 무관하게 유지될 수 있다는 것이 3.9절의 발견이므로, "
-        "gap_s가 작더라도 그게 '데몬이 빨리 재시작돼서'인지 '애초에 커널 집행이 끊긴 적이 없어서'인지는 "
-        "exit_code 기준으로도 완전히 구분되지 않는다 — 다만 로그 기준보다는 실제 집행에 훨씬 가까운 값이다.")
+        "공격은 mock 서버/HTTP를 거치지 않고 직접 fork+exec하므로(watched_self[] 매칭), "
+        "이 gap_s는 job 제출 경로의 오버헤드가 섞이지 않은 값이다 — 첫 버전(HTTP 경로)이 kShield의 "
+        "gap을 3.112초로 보고한 건 전부 그 경로 자체의 지연이었고, 수동 진단(직접 kill+공격)으로는 "
+        "0.003~0.005초였다. Tetragon은 커널 BPF 프로그램이 데몬 생사와 무관하게 유지될 수 있다는 것이 "
+        "3.9절의 발견이므로, gap_s가 작더라도 그게 '데몬이 빨리 재시작돼서'인지 '애초에 커널 집행이 "
+        "끊긴 적이 없어서'인지는 exit_code 기준으로도 완전히 구분되지 않는다 — 다만 이 경로에서는 "
+        "job 제출 경로의 오버헤드가 없으므로 그 구분 불가능성 자체가 실제 값에 훨씬 가깝다.")
 
 
 def parse_groups(args):
