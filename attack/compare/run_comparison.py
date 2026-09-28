@@ -428,10 +428,6 @@ class Tetragon(Tool):
     def healthy(self):
         return self.events_proc is None or self.events_proc.poll() is None
 
-    def _socket_path(self):
-        m = re.search(r"unix://(\S+)", self.args.tetra_extra)
-        return m.group(1) if m else None
-
     def _start_events(self):
         """이벤트 스트림을 띄운다. 소켓이 아직 없으면 tetra가 곧바로 종료하므로,
         살아 있는 것을 확인할 때까지 재시도한다(죽은 스트림은 탐지 0으로 조용히 기록되기 때문)."""
@@ -453,31 +449,31 @@ class Tetragon(Tool):
         r = run(["systemctl", "start", svc])
         if r.returncode != 0:
             die(f"systemctl start {svc} 실패: {r.stderr.strip()}")
-        sock = self._socket_path()
-        ready = False
-        end = time.time() + 40
-        while time.time() < end and not ready:
-            ready = (sock is None or os.path.exists(sock)) and any(
-                run(self.tetra(*c), timeout=10).returncode == 0
-                for c in (("status",), ("tracingpolicy", "list")))
-            if not ready:
-                time.sleep(1)
-        if not ready:
-            self.stop()
-            die("tetragon 에이전트가 40초 안에 준비되지 않았습니다. `tetra status`와 "
-                f"`journalctl -u {svc}`를 확인하세요.")
         pid = run(["systemctl", "show", "-p", "MainPID", "--value", svc]).stdout.strip()
         self._pid = int(pid) if pid.isdigit() and int(pid) > 0 else None
 
         if self.capture_events:
             self._start_events()
 
+        # `tetra status`/`tracingpolicy list`의 종료 코드는 소켓 파일이 아예
+        # 없는 상태(데몬이 전혀 준비 안 됨, "no such file or directory")에서도
+        # 0을 반환하는 것이 실측으로 확인되어 준비 여부 판단에 쓸 수 없다.
+        # 유일하게 실제 상태와 일치했던 신호는 tracingpolicy add 자신의
+        # 반환값이므로, 그 명령 자체를 성공할 때까지 직접 반복 시도한다.
+        added = False
+        add_err = ""
+        end = time.time() + 40
         if self.policy_path:
-            r = run(self.tetra("tracingpolicy", "add", self.policy_path))
-            if r.returncode != 0:
+            while time.time() < end:
+                r = run(self.tetra("tracingpolicy", "add", self.policy_path))
+                if r.returncode == 0:
+                    added = True
+                    break
+                add_err = (r.stdout + r.stderr).strip()
+                time.sleep(0.5)
+            if not added:
                 self.stop()
-                die("Tetragon 정책 로드 실패 — 정책 파일 필드명을 확인하세요:\n"
-                    f"{r.stdout}{r.stderr}")
+                die(f"tetragon 정책 로드가 40초 안에 성공하지 못했습니다:\n{add_err}")
         time.sleep(self.args.tool_warmup)
 
     def crash(self):
@@ -512,14 +508,35 @@ class Tetragon(Tool):
                 "(systemd Restart= 설정을 확인).")
             return
         self._pid = new_pid
+
         if self.capture_events:
             if self.events_proc:
                 terminate(self.events_proc, timeout=5)
                 if self.events_file:
                     self.events_file.close()
             self._start_events()
+
+        # MainPID가 바뀌었다는 건 프로세스가 존재한다는 뜻일 뿐, 그 데몬의 제어
+        # 소켓이 명령을 받을 준비가 됐다는 뜻은 아니다. `tetra status`/
+        # `tracingpolicy list`로 준비 여부를 먼저 확인해보려 했으나, 소켓 파일이
+        # 아예 없는 상태에서도 이 명령들의 종료 코드가 0으로 나오는 것이 실측으로
+        # 확인되어(2026-09-28 진단) 준비 신호로 쓸 수 없다. 실제 상태와 정확히
+        # 일치했던 것은 tracingpolicy add 자신의 반환값뿐이므로, start()와
+        # 동일하게 그 명령 자체를 성공할 때까지 직접 반복 시도한다.
+        added = False
+        add_err = ""
+        add_end = time.time() + 20
         if self.policy_path:
-            run(self.tetra("tracingpolicy", "add", self.policy_path))
+            while time.time() < add_end:
+                r = run(self.tetra("tracingpolicy", "add", self.policy_path))
+                if r.returncode == 0:
+                    added = True
+                    break
+                add_err = (r.stdout + r.stderr).strip()
+                time.sleep(0.3)
+            if not added:
+                log(f"  [경고] {self.args.tetragon_service} MainPID({new_pid}) tracingpolicy add가 "
+                    f"20초 안에 성공하지 못했습니다: {add_err}")
 
     def stop(self):
         terminate(self.events_proc)
