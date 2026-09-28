@@ -7,11 +7,17 @@ run_comparison.py — kShield-VirtualPatch vs Falco vs Tetragon 비교 실험 �
   detect   같은 공격 시나리오를 각 도구에 N회 반복해 탐지·차단 여부를 기록
   perf     off / kshield / falco / tetragon 성능 오버헤드를 같은 세션에서
            ABBA 교차 순서로 측정한다 (결과: attack/results/cmp_raw_*.csv)
+  latency  exec/connect가 "syscall 진입 -> 실제 차단"까지 걸리는 시간(ns)을
+           bpftrace로 중립 관측한다 — kShield-v3(비동기 SIGKILL)와
+           kShield-LSM(동기 -EPERM)의 공격 윈도 길이 차이를 재는 게 1차
+           목적이며, falco/tetragon도 같은 그룹 목록에 넣으면 잰다
+           (결과: attack/results/latency_raw_*.csv)
 
 반드시 root로 실행한다.
     sudo python3 attack/compare/run_comparison.py check
     sudo python3 attack/compare/run_comparison.py detect
     sudo python3 attack/compare/run_comparison.py perf
+    sudo python3 attack/compare/run_comparison.py latency --groups kshield,kshield_lsm
 
 측정 설계
   - 도구를 먼저 띄운 뒤 mock 서버를 띄운다. 모든 도구가 자기 방식으로 계보를
@@ -56,10 +62,12 @@ FALCO_NORULES_RULES = os.path.join(HERE, "falco_norules.yaml")
 TETRAGON_POLICY = os.path.join(HERE, "tetragon_vpatch_policy.yaml")
 TETRAGON_POLICY_NAME = "kcmp-shadow-connect"
 KSHIELD_BIN = os.path.join(REPO_ROOT, "src", "kshield_vpatch")
+KSHIELD_LSM_BIN = os.path.join(REPO_ROOT, "src", "kshield_vpatch_lsm")
 KSHIELD_CTL = os.path.join(REPO_ROOT, "src", "kshield_ctl")
+LATENCY_SCRIPT = os.path.join(HERE, "latency_probe.bt")
 
 DEFAULT_GROUPS = "off,kshield,falco,tetragon"
-ALL_GROUPS = ["off", "kshield", "falco", "falco_default", "falco_norules",
+ALL_GROUPS = ["off", "kshield", "kshield_lsm", "falco", "falco_default", "falco_norules",
               "tetragon", "tetragon_norules"]
 STRAY_PROCESS_NAMES = ["falco", "tetragon", "kshield_vpatch", "kshield_vpatch_lsm"]
 
@@ -300,6 +308,21 @@ class KShield(Tool):
         self._stop_spawned()
 
 
+class KShieldLSM(Tool):
+    name = "kshield_lsm"
+    markers = ["LSM_CONNECT_BLOCK 탐지", "LSM_EXEC_BLOCK 탐지"]
+
+    def start(self):
+        if not os.access(KSHIELD_LSM_BIN, os.X_OK):
+            die(f"{KSHIELD_LSM_BIN} 가 없습니다. 먼저 빌드하세요: cd src && make")
+        self._spawn([KSHIELD_LSM_BIN] + shlex.split(self.args.kshield_args), "kshield_lsm.log")
+        time.sleep(self.args.tool_warmup)
+        self._require_alive()
+
+    def stop(self):
+        self._stop_spawned()
+
+
 class Falco(Tool):
     name = "falco"
     markers = ["KCMP_SHADOW_CONNECT", "KCMP_SHADOW_EXEC"]
@@ -430,7 +453,7 @@ class TetragonNoPolicy(Tetragon):
 
 
 def make_tool(group, args, logdir, capture_events=False):
-    table = {"off": Tool, "kshield": KShield, "falco": Falco,
+    table = {"off": Tool, "kshield": KShield, "kshield_lsm": KShieldLSM, "falco": Falco,
              "falco_default": FalcoDefault, "falco_norules": FalcoNoRules,
              "tetragon": Tetragon, "tetragon_norules": TetragonNoPolicy}
     return table[group](args, logdir, capture_events)
@@ -567,6 +590,8 @@ def preflight(args, groups):
         problems.append(f"{MOCK_SERVER} 없음")
     if "kshield" in groups and not os.access(KSHIELD_BIN, os.X_OK):
         problems.append(f"{KSHIELD_BIN} 없음 — cd src && make")
+    if "kshield_lsm" in groups and not os.access(KSHIELD_LSM_BIN, os.X_OK):
+        problems.append(f"{KSHIELD_LSM_BIN} 없음 — cd src && make")
     if any(g.startswith("falco") for g in groups):
         if not shutil.which(args.falco_bin):
             problems.append("falco 바이너리를 찾을 수 없음 (https://falco.org/docs/ 설치 문서 참고)")
@@ -814,6 +839,164 @@ def cmd_detect(args):
         "연결이 수립될 수 있으며, 유출바이트가 0이면 첫 데이터가 나가기 전에 차단된 것이다.")
 
 
+# ── latency ─────────────────────────────────────────────────────────────────
+LATENCY_FIELDS = ["group", "rep", "phase", "event", "sig", "code_or_ret", "delta_ns"]
+
+LATENCY_LINE_RE = re.compile(
+    r"^(EXEC|CONNECT)_(SYNC_BLOCK|POST_EXIT) pid=(\d+)(?: tid=\d+)?"
+    r"(?: ret=(-?\d+)| exit_code=(-?\d+) sig=(\d+)) delta_ns=(\d+)$"
+)
+
+
+def start_bpftrace(args, logdir, nc_path):
+    logpath = os.path.join(logdir, "latency_probe.log")
+    lf = open(logpath, "ab", buffering=0)
+    proc = subprocess.Popen([args.bpftrace_bin, LATENCY_SCRIPT, nc_path],
+                            stdout=lf, stderr=subprocess.STDOUT, start_new_session=True)
+    end = time.time() + 20
+    ready = False
+    while time.time() < end:
+        if proc.poll() is not None:
+            break
+        with open(logpath, "rb") as f:
+            if b"latency_probe: target=" in f.read():
+                ready = True
+                break
+        time.sleep(0.3)
+    if not ready:
+        terminate(proc, timeout=10)
+        lf.close()
+        with open(logpath, encoding="utf-8", errors="replace") as f:
+            tail = f.read()
+        die(f"bpftrace가 20초 안에 attach하지 못했습니다(root 권한·커널 BTF 확인). 로그:\n{tail}")
+    return proc, lf, logpath
+
+
+def stop_bpftrace(proc, lf):
+    terminate(proc, timeout=10)
+    if lf:
+        lf.close()
+
+
+def read_new_lines(path, offset):
+    with open(path, "rb") as f:
+        f.seek(offset)
+        data = f.read()
+    return data.decode("utf-8", "replace"), offset + len(data)
+
+
+def parse_latency_lines(text):
+    rows = []
+    for line in text.splitlines():
+        m = LATENCY_LINE_RE.match(line.strip())
+        if not m:
+            continue
+        phase, event, _pid, ret, code, sig, delta_ns = m.groups()
+        rows.append({
+            "phase": phase.lower(), "event": event.lower(),
+            "sig": sig or "", "code_or_ret": ret if ret is not None else code,
+            "delta_ns": int(delta_ns),
+        })
+    return rows
+
+
+def cmd_latency(args):
+    require_root()
+    groups = parse_groups(args)
+    if not shutil.which(args.bpftrace_bin):
+        die(f"{args.bpftrace_bin} 를 찾을 수 없습니다: sudo apt install -y bpftrace")
+    if not os.path.isfile(LATENCY_SCRIPT):
+        die(f"{LATENCY_SCRIPT} 없음")
+    nc_path = shutil.which("nc")
+    if not nc_path:
+        die("nc 가 없어 latency 실험을 진행할 수 없습니다.")
+    ip = resolve_untrusted_ip(args)
+    scenarios = build_scenarios(ip, args.untrusted_port)
+    attack_cmd = next(c for n, c, atk in scenarios if n == "nc_untrusted")
+    preflight(args, groups)
+
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    os.makedirs(RESULTS_DIR, exist_ok=True)
+    logdir = os.path.join(RESULTS_DIR, f"latency_logs_{ts}")
+    os.makedirs(logdir)
+    out_path = os.path.join(RESULTS_DIR, f"latency_raw_{ts}.csv")
+    meta_path = os.path.join(RESULTS_DIR, f"latency_meta_{ts}.json")
+    meta = collect_meta(args, groups)
+    meta["untrusted_dest"] = f"{ip}:{args.untrusted_port}"
+    meta["nc_path"] = nc_path
+    with open(meta_path, "w", encoding="utf-8") as f:
+        json.dump(meta, f, ensure_ascii=False, indent=2)
+
+    rows = []
+    try:
+        sink = Sink(ip, args.untrusted_port)
+    except OSError as e:
+        die(f"Sink를 {ip}:{args.untrusted_port} 에 열지 못했습니다: {e} "
+            "(포트 사용 중이면 --untrusted-port 로 바꾸세요)")
+    log(f"신뢰되지 않은 목적지(Sink): {ip}:{args.untrusted_port} | nc={nc_path} | "
+        f"그룹당 {args.repeats}회")
+
+    try:
+        for group in groups:
+            log(f"\n=== [지연시간] {group} ===")
+            tool = make_tool(group, args, logdir)
+            server = None
+            bt_proc = bt_lf = bt_path = None
+            offset = 0
+            try:
+                tool.start()
+                server = start_server(args, logdir)
+                bt_proc, bt_lf, bt_path = start_bpftrace(args, logdir, nc_path)
+                offset = os.path.getsize(bt_path)
+                for rep in range(1, args.repeats + 1):
+                    resfile = f"/tmp/kcmp_lat_{os.getpid()}_{group}_{rep}.res"
+                    submit_job(args.host, args.port, f"{attack_cmd}; echo rc=$? > {resfile}")
+                    wait_result(resfile, args.scenario_timeout)
+                    if os.path.exists(resfile):
+                        os.remove(resfile)
+                    time.sleep(args.settle)
+                    if bt_proc.poll() is not None:
+                        die(f"{group}: bpftrace가 실험 도중 종료되었습니다. 로그: {bt_path}")
+                    if not tool.healthy():
+                        die(f"{group}: 도구가 실험 도중 종료되어 이 그룹의 결과는 무효입니다.\n"
+                            f"{tool.tail()}")
+                    text, offset = read_new_lines(bt_path, offset)
+                    new_rows = parse_latency_lines(text)
+                    if not new_rows:
+                        log(f"  rep {rep:>2}: (관측된 이벤트 없음 — --settle을 늘려보거나 로그를 확인)")
+                    for r in new_rows:
+                        r["group"], r["rep"] = group, rep
+                        rows.append(r)
+                    summary = ", ".join(f"{r['phase']}/{r['event']}(sig={r['sig'] or '-'})="
+                                        f"{r['delta_ns'] / 1000:.1f}us" for r in new_rows) or "-"
+                    log(f"  rep {rep:>2}: {summary}")
+            finally:
+                if bt_proc:
+                    stop_bpftrace(bt_proc, bt_lf)
+                stop_server(server)
+                tool.stop()
+                time.sleep(args.cooldown)
+    finally:
+        sink.close()
+        if rows:
+            with open(out_path, "w", newline="", encoding="utf-8") as f:
+                w = csv.DictWriter(f, fieldnames=LATENCY_FIELDS)
+                w.writeheader()
+                w.writerows(rows)
+        chown_tree(logdir)
+        for p in (out_path, meta_path):
+            if os.path.exists(p):
+                chown_tree(p)
+    analyze_cmd = f"python3 attack/compare/compare_latency_stats.py {out_path}"
+    if len(groups) >= 2:
+        analyze_cmd += f" --compare {groups[0]},{groups[1]}"
+    log(f"\n원시 결과: {out_path}\n메타데이터: {meta_path}")
+    log(f"분석: {analyze_cmd}")
+    log("해석: post_exit 행은 sig=9(SIGKILL로 실제로 죽음)와 sig=0(정상 종료, 안 막힌 것)을 "
+        "반드시 구분해서 읽는다. sync_block 행의 delta_ns는 판정 로직 자체의 소요 시간이고, "
+        "post_exit(sig=9) 행의 delta_ns는 '공격이 살아있던 시간(attack window)'이다.")
+
+
 def parse_groups(args):
     groups = [g.strip() for g in args.groups.split(",") if g.strip()]
     bad = [g for g in groups if g not in ALL_GROUPS]
@@ -833,7 +1016,9 @@ def build_parser():
     p.add_argument("--untrusted-port", type=int, default=18080, help="Sink 수신 포트")
     p.add_argument("--tool-warmup", type=float, default=8.0, help="도구 기동 후 대기(초)")
     p.add_argument("--cooldown", type=float, default=5.0, help="블록 사이 대기(초)")
-    p.add_argument("--kshield-args", default="", help="kshield_vpatch 추가 인자")
+    p.add_argument("--kshield-args", default="",
+                   help="kshield_vpatch(v3) 또는 kshield_vpatch_lsm 추가 인자(그룹에 맞는 쪽으로 전달)")
+    p.add_argument("--bpftrace-bin", default="bpftrace", help="latency 서브커맨드에서 쓸 bpftrace 경로")
     p.add_argument("--falco-bin", default="falco")
     p.add_argument("--falco-engine", default="modern_ebpf", help="engine.kind 값")
     p.add_argument("--falco-extra", default="", help="falco 추가 인자")
@@ -857,13 +1042,19 @@ def build_parser():
     dd.add_argument("--repeats", type=int, default=10)
     dd.add_argument("--settle", type=float, default=1.5, help="시나리오 후 로그 반영 대기(초)")
     dd.add_argument("--scenario-timeout", type=float, default=10.0)
+
+    ll = sub.add_parser("latency", help="exec/connect 차단까지 걸리는 시간(ns) 비교(bpftrace 필요)")
+    ll.add_argument("--repeats", type=int, default=30)
+    ll.add_argument("--settle", type=float, default=2.0,
+                    help="rep마다 bpftrace 출력이 파일에 반영될 때까지 대기(초)")
+    ll.add_argument("--scenario-timeout", type=float, default=10.0)
     return p
 
 
 def main():
     parser = build_parser()
     args = parser.parse_args()
-    handlers = {"check": cmd_check, "perf": cmd_perf, "detect": cmd_detect}
+    handlers = {"check": cmd_check, "perf": cmd_perf, "detect": cmd_detect, "latency": cmd_latency}
     if args.cmd not in handlers:
         parser.print_help()
         return

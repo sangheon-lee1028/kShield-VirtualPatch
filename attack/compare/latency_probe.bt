@@ -1,0 +1,103 @@
+#!/usr/bin/env bpftrace
+/*
+ * latency_probe.bt — kShield-VirtualPatch 지연시간 실험용 중립 관측기
+ *
+ * kShield-v3(kprobe/tracepoint, 비동기 bpf_send_signal SIGKILL)와
+ * kShield-LSM(security_bprm_check_security/security_socket_connect, 동기
+ * -EPERM)이 "공격 syscall 진입 -> 실제 차단"까지 얼마나 걸리는지를, 세
+ * 도구(kShield/Falco/Tetragon) 중 어느 것도 아닌 별도의 관측 BPF 프로그램으로
+ * 잰다. 커널 tracepoint/kprobe만 쓰므로 어느 도구가 떠 있어도 같은 방법으로
+ * 잴 수 있다 — run_comparison.py의 그룹(off/kshield/kshield_lsm/falco/tetragon)
+ * 전부에 대해 동일한 스크립트를 그대로 쓴다.
+ *
+ * 사용법:
+ *   sudo bpftrace latency_probe.bt "$(which nc)"
+ *
+ * 출력 한 줄 = 이벤트 하나.
+ *   EXEC_SYNC_BLOCK    execve() 자체가 즉시 실패(예: LSM -EPERM). delta_ns는
+ *                      sys_enter_execve부터 sys_exit_execve까지 — 판정
+ *                      로직 자체의 소요 시간이다.
+ *   EXEC_POST_EXIT     execve()는 성공, 그 이후 프로세스가 종료됨. sig=9면
+ *                      SIGKILL로 실제로 죽은 것(비동기 차단), sig=0이면 그냥
+ *                      정상 종료(안 막힌 것) — 둘을 반드시 구분해서 읽는다.
+ *                      delta_ns는 execve 성공 시점부터 실제 사망까지, 즉
+ *                      "공격 실행이 살아있던 시간(attack window)"이다.
+ *   CONNECT_SYNC_BLOCK connect() 자체가 즉시 실패. delta_ns 의미는 위와 동일.
+ *   CONNECT_POST_EXIT  connect()는 성공(또는 진행), 그 이후 프로세스 종료.
+ *                      sig 해석은 EXEC_POST_EXIT과 동일.
+ *
+ * LSM이 exec 단계에서 막으면 그 프로세스는 애초에 connect()까지 가지 않으므로
+ * CONNECT_* 행이 안 나오는 게 정상이다.
+ */
+
+BEGIN
+{
+    printf("latency_probe: target=%s 관측 시작 (Ctrl+C로 종료)\n", str($1));
+}
+
+tracepoint:syscalls:sys_enter_execve
+/ str(args->filename) == str($1) /
+{
+    @exec_t0[tid] = nsecs;
+    @exec_pid[tid] = pid;
+}
+
+tracepoint:syscalls:sys_exit_execve
+/ @exec_t0[tid] /
+{
+    $delta = nsecs - @exec_t0[tid];
+    if (args->ret < 0) {
+        printf("EXEC_SYNC_BLOCK pid=%d tid=%d ret=%d delta_ns=%llu\n",
+               @exec_pid[tid], tid, args->ret, $delta);
+    } else {
+        @exec_ok[@exec_pid[tid]] = @exec_t0[tid];
+    }
+    delete(@exec_t0[tid]);
+    delete(@exec_pid[tid]);
+}
+
+tracepoint:syscalls:sys_enter_connect
+/ comm == "nc" /
+{
+    @conn_t0[tid] = nsecs;
+    @conn_pid[tid] = pid;
+}
+
+tracepoint:syscalls:sys_exit_connect
+/ @conn_t0[tid] /
+{
+    $delta = nsecs - @conn_t0[tid];
+    if (args->ret < 0) {
+        printf("CONNECT_SYNC_BLOCK pid=%d tid=%d ret=%d delta_ns=%llu\n",
+               @conn_pid[tid], tid, args->ret, $delta);
+    } else {
+        @conn_ok[@conn_pid[tid]] = @conn_t0[tid];
+    }
+    delete(@conn_t0[tid]);
+    delete(@conn_pid[tid]);
+}
+
+kprobe:do_exit
+/ @exec_ok[pid] || @conn_ok[pid] /
+{
+    $code = curtask->exit_code;
+    $sig = $code & 0x7f;
+    if (@exec_ok[pid]) {
+        $delta = nsecs - @exec_ok[pid];
+        printf("EXEC_POST_EXIT pid=%d exit_code=%d sig=%d delta_ns=%llu\n",
+               pid, $code, $sig, $delta);
+        delete(@exec_ok[pid]);
+    }
+    if (@conn_ok[pid]) {
+        $delta = nsecs - @conn_ok[pid];
+        printf("CONNECT_POST_EXIT pid=%d exit_code=%d sig=%d delta_ns=%llu\n",
+               pid, $code, $sig, $delta);
+        delete(@conn_ok[pid]);
+    }
+}
+
+END
+{
+    clear(@exec_t0); clear(@exec_pid); clear(@exec_ok);
+    clear(@conn_t0); clear(@conn_pid); clear(@conn_ok);
+}
