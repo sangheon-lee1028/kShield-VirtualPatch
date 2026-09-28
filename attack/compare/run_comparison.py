@@ -12,12 +12,17 @@ run_comparison.py — kShield-VirtualPatch vs Falco vs Tetragon 비교 실험 �
            kShield-LSM(동기 -EPERM)의 공격 윈도 길이 차이를 재는 게 1차
            목적이며, falco/tetragon도 같은 그룹 목록에 넣으면 잰다
            (결과: attack/results/latency_raw_*.csv)
+  restart-gap  도구를 kill -9로 죽이고 즉시 재기동하는 동안, 도구 자신의
+           로그에 markers가 다시 찍히기까지 몇 초나 걸리는지 N회 반복
+           측정한다 — 3.9절(kShield/Tetragon, 정성적)·4.6.1절(Falco, N=1)
+           을 같은 방법론으로 통일해 재본다 (결과: attack/results/restart_gap_raw_*.csv)
 
 반드시 root로 실행한다.
     sudo python3 attack/compare/run_comparison.py check
     sudo python3 attack/compare/run_comparison.py detect
     sudo python3 attack/compare/run_comparison.py perf
     sudo python3 attack/compare/run_comparison.py latency --groups kshield,kshield_lsm
+    sudo python3 attack/compare/run_comparison.py restart-gap --groups kshield,falco,tetragon
 
 측정 설계
   - 도구를 먼저 띄운 뒤 mock 서버를 띄운다. 모든 도구가 자기 방식으로 계보를
@@ -244,6 +249,20 @@ class Tool:
     def stop(self):
         pass
 
+    def crash(self):
+        """kill -9로 강제 종료(정상 종료가 아닌, 크래시를 흉내 낸다). off에는 해당 없음."""
+        if self._pid:
+            try:
+                os.kill(self._pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+    def respawn_fast(self):
+        """crash() 직후 즉시 재기동한다 — start()와 달리 warmup sleep을 넣지 않는다.
+        재시작 무방비 구간(gap) 실험은 이 sleep 자체가 측정하려는 대상이므로,
+        respawn 호출 자체는 최대한 빨리 반환하고 gap 유무는 호출부의 폴링 루프가 잰다."""
+        pass
+
     def pid(self):
         return self._pid
 
@@ -296,31 +315,33 @@ class Tool:
 class KShield(Tool):
     name = "kshield"
     markers = ["SHADOW_CONNECT 탐지", "SHADOW_EXEC 탐지"]
+    bin_path = KSHIELD_BIN
+    logname = "kshield.log"
+
+    def _spawn_self(self):
+        if not os.access(self.bin_path, os.X_OK):
+            die(f"{self.bin_path} 가 없습니다. 먼저 빌드하세요: cd src && make")
+        if self.logfile:
+            self.logfile.close()
+        self._spawn([self.bin_path] + shlex.split(self.args.kshield_args), self.logname)
 
     def start(self):
-        if not os.access(KSHIELD_BIN, os.X_OK):
-            die(f"{KSHIELD_BIN} 가 없습니다. 먼저 빌드하세요: cd src && make")
-        self._spawn([KSHIELD_BIN] + shlex.split(self.args.kshield_args), "kshield.log")
+        self._spawn_self()
         time.sleep(self.args.tool_warmup)
         self._require_alive()
+
+    def respawn_fast(self):
+        self._spawn_self()
 
     def stop(self):
         self._stop_spawned()
 
 
-class KShieldLSM(Tool):
+class KShieldLSM(KShield):
     name = "kshield_lsm"
     markers = ["LSM_CONNECT_BLOCK 탐지", "LSM_EXEC_BLOCK 탐지"]
-
-    def start(self):
-        if not os.access(KSHIELD_LSM_BIN, os.X_OK):
-            die(f"{KSHIELD_LSM_BIN} 가 없습니다. 먼저 빌드하세요: cd src && make")
-        self._spawn([KSHIELD_LSM_BIN] + shlex.split(self.args.kshield_args), "kshield_lsm.log")
-        time.sleep(self.args.tool_warmup)
-        self._require_alive()
-
-    def stop(self):
-        self._stop_spawned()
+    bin_path = KSHIELD_LSM_BIN
+    logname = "kshield_lsm.log"
 
 
 class Falco(Tool):
@@ -330,14 +351,22 @@ class Falco(Tool):
     def rules_path(self):
         return FALCO_RULES
 
-    def start(self):
+    def _spawn_self(self):
         cmd = [self.args.falco_bin, "-r", self.rules_path(),
                "-o", f"engine.kind={self.args.falco_engine}",
                "-o", "json_output=true", "-o", "buffered_outputs=false"]
         cmd += shlex.split(self.args.falco_extra)
+        if self.logfile:
+            self.logfile.close()
         self._spawn(cmd, f"{self.name}.log")
+
+    def start(self):
+        self._spawn_self()
         time.sleep(self.args.tool_warmup)
         self._require_alive()
+
+    def respawn_fast(self):
+        self._spawn_self()
 
     def stop(self):
         self._stop_spawned()
@@ -433,6 +462,47 @@ class Tetragon(Tool):
                 die("Tetragon 정책 로드 실패 — 정책 파일 필드명을 확인하세요:\n"
                     f"{r.stdout}{r.stderr}")
         time.sleep(self.args.tool_warmup)
+
+    def crash(self):
+        """systemctl stop이 아니라 MainPID를 직접 SIGKILL — 의도된 종료가 아닌
+        크래시를 흉내 낸다(3.9절과 동일한 방법론). systemd의 Restart=on-failure가
+        데몬 자체는 알아서 재시작시키므로, respawn_fast()는 재기동을 직접 트리거하지
+        않고 그 결과(MainPID 변경)만 기다린다."""
+        pid = run(["systemctl", "show", "-p", "MainPID", "--value", self.args.tetragon_service]).stdout.strip()
+        if pid.isdigit() and int(pid) > 0:
+            try:
+                os.kill(int(pid), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+    def respawn_fast(self):
+        """systemd가 데몬을 알아서 재시작시키는지 기다렸다가(최대 10초), 살아나면
+        MainPID를 갱신하고 이벤트 스트림·정책을 다시 붙인다. 커널 BPF 프로그램
+        자체는 데몬 생사와 무관하게 유지될 수 있다는 것이 3.9절의 발견이므로,
+        여기서 실제로 재기동되는지는 이 실험이 검증하는 대상 중 하나다."""
+        old_pid = self._pid
+        new_pid = None
+        end = time.time() + 10
+        while time.time() < end:
+            pid = run(["systemctl", "show", "-p", "MainPID", "--value",
+                       self.args.tetragon_service]).stdout.strip()
+            if pid.isdigit() and int(pid) > 0 and int(pid) != old_pid:
+                new_pid = int(pid)
+                break
+            time.sleep(0.2)
+        if new_pid is None:
+            log(f"  [경고] {self.args.tetragon_service} 가 10초 안에 재시작되지 않았습니다"
+                "(systemd Restart= 설정을 확인).")
+            return
+        self._pid = new_pid
+        if self.capture_events:
+            if self.events_proc:
+                terminate(self.events_proc, timeout=5)
+                if self.events_file:
+                    self.events_file.close()
+            self._start_events()
+        if self.policy_path:
+            run(self.tetra("tracingpolicy", "add", self.policy_path))
 
     def stop(self):
         terminate(self.events_proc)
@@ -997,6 +1067,139 @@ def cmd_latency(args):
         "post_exit(sig=9) 행의 delta_ns는 '공격이 살아있던 시간(attack window)'이다.")
 
 
+# ── restart-gap ───────────────────────────────────────────────────────────
+RESTART_GAP_FIELDS = ["group", "trial", "gap_s", "timed_out", "attempts"]
+
+
+def cmd_restart_gap(args):
+    """3.9절·4.6.1절이 각각 kShield/Tetragon(정성적 확인)과 Falco(N=1)로 따로
+    보였던 '데몬을 kill -9로 죽이고 재기동하는 동안 실제로 몇 초나 무방비인가'를
+    같은 방법론으로 N회 반복 측정한다. 판정 기준은 도구 자신의 로그에 markers가
+    다시 찍히는 시점이다 — Falco는 탐지만 하고 막지는 않으므로(4.5절), Sink 수립
+    여부가 아니라 로그를 기준으로 삼아야 kShield/Tetragon과 같은 잣대가 된다."""
+    require_root()
+    groups = [g for g in parse_groups(args) if g != "off"]
+    if not groups:
+        die("off 그룹은 재시작이 없어 이 실험 대상이 아닙니다. --groups로 지정하세요 "
+            "(예: --groups kshield,falco,tetragon).")
+    ip = resolve_untrusted_ip(args)
+    scenarios = build_scenarios(ip, args.untrusted_port)
+    attack_cmd = next(c for n, c, atk in scenarios if n == "nc_untrusted")
+    preflight(args, groups)
+
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    os.makedirs(RESULTS_DIR, exist_ok=True)
+    logdir = os.path.join(RESULTS_DIR, f"restart_gap_logs_{ts}")
+    os.makedirs(logdir)
+    out_path = os.path.join(RESULTS_DIR, f"restart_gap_raw_{ts}.csv")
+    meta_path = os.path.join(RESULTS_DIR, f"restart_gap_meta_{ts}.json")
+    meta = collect_meta(args, groups)
+    meta["untrusted_dest"] = f"{ip}:{args.untrusted_port}"
+    with open(meta_path, "w", encoding="utf-8") as f:
+        json.dump(meta, f, ensure_ascii=False, indent=2)
+
+    rows = []
+    try:
+        sink = Sink(ip, args.untrusted_port)
+    except OSError as e:
+        die(f"Sink를 {ip}:{args.untrusted_port} 에 열지 못했습니다: {e}")
+    log(f"신뢰되지 않은 목적지(Sink): {ip}:{args.untrusted_port} | 그룹당 {args.repeats}회 "
+        f"| gap-timeout {args.gap_timeout}s")
+
+    def probe_once():
+        """공격 한 번 제출하고 완료까지 기다린다. 반환값은 없다 — 판정은 호출부가
+        도구 로그로 한다(Falco는 차단이 아니라 탐지만 하므로)."""
+        resfile = f"/tmp/kcmp_gap_{os.getpid()}_{int(time.time() * 1000)}.res"
+        submit_job(args.host, args.port, f"{attack_cmd}; echo rc=$? > {resfile}")
+        wait_result(resfile, args.probe_timeout)
+        if os.path.exists(resfile):
+            os.remove(resfile)
+
+    try:
+        for group in groups:
+            log(f"\n=== [재시작 무방비 구간] {group} ===")
+            tool = make_tool(group, args, logdir, capture_events=group.startswith("tetragon"))
+            server = None
+            try:
+                tool.start()
+                server = start_server(args, logdir)
+
+                offset = tool.log_size()
+                probe_once()
+                time.sleep(0.5)
+                if not any(m in tool.read_log_from(offset) for m in tool.markers):
+                    log(f"  [경고] 기준 공격이 탐지되지 않아 이 그룹은 건너뜁니다.\n{tool.tail()}")
+                    continue
+
+                for trial in range(1, args.repeats + 1):
+                    if not tool.healthy():
+                        die(f"{group}: 트라이얼 {trial} 시작 전 도구가 이미 죽어 있습니다.\n{tool.tail()}")
+                    t0 = time.monotonic()
+                    tool.crash()
+                    old_pid = tool.pid()
+                    end_wait = time.time() + 3
+                    while time.time() < end_wait and old_pid:
+                        try:
+                            os.kill(old_pid, 0)
+                            time.sleep(0.05)
+                        except (ProcessLookupError, PermissionError):
+                            break
+                    tool.respawn_fast()
+
+                    detected_at = None
+                    attempts = 0
+                    deadline = t0 + args.gap_timeout
+                    while time.monotonic() < deadline:
+                        attempts += 1
+                        offset = tool.log_size()
+                        probe_once()
+                        new = tool.read_log_from(offset)
+                        if any(m in new for m in tool.markers):
+                            detected_at = time.monotonic()
+                            break
+                        time.sleep(args.poll_interval)
+
+                    gap = (detected_at - t0) if detected_at else None
+                    rows.append({"group": group, "trial": trial,
+                                 "gap_s": "" if gap is None else round(gap, 3),
+                                 "timed_out": int(gap is None), "attempts": attempts})
+                    gap_str = f"TIMEOUT(>{args.gap_timeout}s)" if gap is None else f"{gap:.3f}s"
+                    log(f"  trial {trial:>2}: {gap_str}  ({attempts}회 시도)")
+                    time.sleep(args.cooldown)
+            finally:
+                stop_server(server)
+                tool.stop()
+                time.sleep(args.cooldown)
+    finally:
+        sink.close()
+        if rows:
+            with open(out_path, "w", newline="", encoding="utf-8") as f:
+                w = csv.DictWriter(f, fieldnames=RESTART_GAP_FIELDS)
+                w.writeheader()
+                w.writerows(rows)
+        chown_tree(logdir)
+        for p in (out_path, meta_path):
+            if os.path.exists(p):
+                chown_tree(p)
+
+    log(f"\n원시 결과: {out_path}\n메타데이터: {meta_path}")
+    for group in groups:
+        vals = [r["gap_s"] for r in rows if r["group"] == group and r["gap_s"] != ""]
+        n_timeout = sum(1 for r in rows if r["group"] == group and r["timed_out"])
+        if vals:
+            mean = sum(vals) / len(vals)
+            sd = (sum((v - mean) ** 2 for v in vals) / (len(vals) - 1)) ** 0.5 if len(vals) > 1 else 0.0
+            log(f"{group:<14}: N={len(vals)} 평균 {mean:.3f}s ± {sd:.3f}s"
+                + (f"  (타임아웃 {n_timeout}건 별도)" if n_timeout else ""))
+        else:
+            log(f"{group:<14}: 전부 타임아웃({n_timeout}건) — 이 그룹은 gap-timeout 안에 재탐지되지 않았습니다.")
+    log("\n해석: gap_s는 kill -9 시점부터 도구 로그에 markers가 다시 찍히기까지의 시간이다. "
+        "Tetragon은 커널 BPF 프로그램이 데몬 생사와 무관하게 유지될 수 있다는 것이 3.9절의 발견이므로, "
+        "gap_s가 작더라도 그게 '데몬이 빨리 재시작돼서'인지 '애초에 커널 집행이 끊긴 적이 없어서'인지는 "
+        "이 실험만으로 구분되지 않는다 — 이벤트 스트림(tetra getevents) 재연결 지연이 실제 집행 지연으로 "
+        "잘못 잡힐 수 있다는 뜻이다.")
+
+
 def parse_groups(args):
     groups = [g.strip() for g in args.groups.split(",") if g.strip()]
     bad = [g for g in groups if g not in ALL_GROUPS]
@@ -1048,13 +1251,21 @@ def build_parser():
     ll.add_argument("--settle", type=float, default=2.0,
                     help="rep마다 bpftrace 출력이 파일에 반영될 때까지 대기(초)")
     ll.add_argument("--scenario-timeout", type=float, default=10.0)
+
+    rg = sub.add_parser("restart-gap", help="데몬 kill -9 후 재시작까지 실제 무방비 구간(초) 측정")
+    rg.add_argument("--repeats", type=int, default=10, help="그룹당 kill+재시작 반복 횟수")
+    rg.add_argument("--poll-interval", type=float, default=0.3, help="재탐지 확인 사이 대기(초)")
+    rg.add_argument("--gap-timeout", type=float, default=15.0,
+                    help="이 시간 안에 재탐지되지 않으면 타임아웃으로 기록(초)")
+    rg.add_argument("--probe-timeout", type=float, default=5.0, help="공격 1회 완료 대기(초)")
     return p
 
 
 def main():
     parser = build_parser()
     args = parser.parse_args()
-    handlers = {"check": cmd_check, "perf": cmd_perf, "detect": cmd_detect, "latency": cmd_latency}
+    handlers = {"check": cmd_check, "perf": cmd_perf, "detect": cmd_detect, "latency": cmd_latency,
+                "restart-gap": cmd_restart_gap}
     if args.cmd not in handlers:
         parser.print_help()
         return
