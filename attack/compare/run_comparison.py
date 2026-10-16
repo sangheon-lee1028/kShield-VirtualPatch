@@ -1369,6 +1369,8 @@ def cmd_rt_pilot(args):
     ncpu = os.cpu_count() or 1
     rt_cpu = args.rt_cpu if args.rt_cpu < ncpu else 0
     other_cpus = ",".join(str(c) for c in range(ncpu) if c != rt_cpu)
+    # 훅은 시스템콜이 일어난 CPU에서 실행되므로, 부하를 RT 코어 밖에 두면 훅 비용이 RT 작업에 닿지 않는다.
+    load_cpus = {"others": other_cpus, "same": str(rt_cpu), "all": ""}[args.load_where]
     realtime_file = "/sys/kernel/realtime"
     is_rt = os.path.exists(realtime_file) and open(realtime_file).read().strip() == "1"
     if not is_rt:
@@ -1385,7 +1387,7 @@ def cmd_rt_pilot(args):
     meta_path = os.path.join(RESULTS_DIR, f"rt_pilot_meta_{ts}.json")
     meta = collect_meta(args, groups)
     meta.update({"preempt_rt": is_rt, "uname_v": run(["uname", "-v"]).stdout.strip(),
-                 "rt_cpu": rt_cpu, "load_cpus": other_cpus,
+                 "rt_cpu": rt_cpu, "load_where": args.load_where, "load_cpus": load_cpus,
                  "cyclictest_version": (run(["cyclictest", "--version"]).stdout
                                         + run(["cyclictest", "--version"]).stderr).strip()})
     with open(meta_path, "w", encoding="utf-8") as f:
@@ -1394,7 +1396,7 @@ def cmd_rt_pilot(args):
     cyc_cmd = ["cyclictest", "-q", "-m", "-p", str(args.rt_prio), "-i", str(args.interval_us),
                "-D", f"{args.duration}s", "-t", "1", "-a", str(rt_cpu), "-h", str(args.hist_max)]
     log(f"cyclictest: {' '.join(cyc_cmd)}")
-    log(f"부하: {args.load_args or '(없음)'} (코어 {other_cpus or '분리 안 함'}) | "
+    log(f"부하: {args.load_args or '(없음)'} (배치 {args.load_where}, 코어 {load_cpus or '고정 안 함'}) | "
         f"그룹 {', '.join(groups)} | 반복 {args.repeats}회 × {args.duration}s")
 
     rows = []
@@ -1409,8 +1411,8 @@ def cmd_rt_pilot(args):
                     tool.start()
                     if load_cmd:
                         cmd = ["stress-ng"] + load_cmd + ["--timeout", f"{args.duration + 30}s"]
-                        if other_cpus:
-                            cmd = ["taskset", "-c", other_cpus] + cmd
+                        if load_cpus:
+                            cmd = ["taskset", "-c", load_cpus] + cmd
                         load = subprocess.Popen(cmd, stdout=subprocess.DEVNULL,
                                                 stderr=subprocess.DEVNULL, start_new_session=True)
                         time.sleep(2)
@@ -1531,6 +1533,8 @@ def build_parser():
     rt.add_argument("--rt-prio", type=int, default=80, help="SCHED_FIFO 우선순위")
     rt.add_argument("--rt-cpu", type=int, default=1, help="cyclictest를 고정할 CPU 번호")
     rt.add_argument("--hist-max", type=int, default=2000, help="히스토그램 상한(µs)")
+    rt.add_argument("--load-where", choices=["others", "same", "all"], default="others",
+                    help="부하 배치: others=RT 코어 밖, same=RT 코어와 같은 코어, all=고정 안 함")
     rt.add_argument("--load-args", default="--open 2 --fork 2 --pipe 2",
                     help="stress-ng 인자(시스템콜 이벤트를 만드는 부하). 빈 문자열이면 부하 없음")
     return p
