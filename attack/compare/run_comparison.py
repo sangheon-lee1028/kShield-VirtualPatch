@@ -20,6 +20,11 @@ run_comparison.py — kShield-VirtualPatch vs Falco vs Tetragon 비교 실험 �
            버전은 HTTP job 제출 경로를 썼다가 그 경로 자체의 지연을
            kShield의 진짜 gap(0.003~0.005초)과 혼동해 3.1초로 잘못
            보고했었다 (결과: attack/results/restart_gap_raw_*.csv)
+  rt-pilot 보안 도구(Falco/Tetragon 등)를 켠 상태에서 같은 시스템콜 부하를 주고
+           cyclictest로 실시간 작업의 깨어남 지연 분포(평균/p99/p99.9/p99.99/최대)를
+           도구별로 비교하는 파일럿. 본 실험 전에 "신호가 보이는지"만 확인하는
+           용도다 — rt-tests·stress-ng가 필요하고, PREEMPT_RT 커널이 아니면
+           결과에 그 사실을 기록한다 (결과: attack/results/rt_pilot_raw_*.csv)
 
 반드시 root로 실행한다.
     sudo python3 attack/compare/run_comparison.py check
@@ -27,6 +32,7 @@ run_comparison.py — kShield-VirtualPatch vs Falco vs Tetragon 비교 실험 �
     sudo python3 attack/compare/run_comparison.py perf
     sudo python3 attack/compare/run_comparison.py latency --groups kshield,kshield_lsm
     sudo python3 attack/compare/run_comparison.py restart-gap --groups kshield,falco,tetragon
+    sudo python3 attack/compare/run_comparison.py --groups off,falco,tetragon rt-pilot
 
 측정 설계
   - 도구를 먼저 띄운 뒤 mock 서버를 띄운다. 모든 도구가 자기 방식으로 계보를
@@ -45,6 +51,7 @@ import argparse
 import csv
 import hashlib
 import json
+import math
 import os
 import shlex
 import re
@@ -1305,6 +1312,157 @@ def cmd_restart_gap(args):
         "job 제출 경로의 오버헤드가 없으므로 그 구분 불가능성 자체가 실제 값에 훨씬 가깝다.")
 
 
+# ── rt-pilot ────────────────────────────────────────────────────────────────
+RT_PILOT_FIELDS = ["group", "rep", "min_us", "avg_us", "max_us", "p99_us", "p999_us",
+                   "p9999_us", "samples", "overflow"]
+
+
+def parse_cyclictest(text):
+    """`cyclictest -q -h N` 출력에서 (히스토그램 {버킷(µs): 횟수}, 요약 {min/avg/max/overflow})를
+    읽는다. 스레드가 하나(-t 1)라는 전제다."""
+    buckets, summary = {}, {}
+    for line in text.splitlines():
+        s = line.strip()
+        m = re.match(r"^(\d+)\s+((?:\d+\s*)+)$", s)
+        if m:
+            buckets[int(m.group(1))] = sum(int(x) for x in m.group(2).split())
+            continue
+        m = re.match(r"^#\s*(Min|Avg|Max) Latencies:\s*(\d+)", s)
+        if m:
+            summary[m.group(1).lower()] = int(m.group(2))
+            continue
+        m = re.match(r"^#\s*Histogram Overflows:\s*(\d+)", s)
+        if m:
+            summary["overflow"] = int(m.group(1))
+    return buckets, summary
+
+
+def hist_quantiles(buckets, overflow, quantiles):
+    """히스토그램에서 분위수(µs)를 구한다. 히스토그램 상한 밖(overflow)에 걸리면 None."""
+    total = sum(buckets.values()) + overflow
+    if total == 0:
+        return {q: None for q in quantiles}, 0
+    ordered = sorted(buckets.items())
+    out = {}
+    for q in quantiles:
+        target = math.ceil(q * total)
+        cum, val = 0, None
+        for b, c in ordered:
+            cum += c
+            if cum >= target:
+                val = b
+                break
+        out[q] = val
+    return out, total
+
+
+def cmd_rt_pilot(args):
+    require_root()
+    groups = parse_groups(args)
+    load_cmd = shlex.split(args.load_args)
+    needed = ["cyclictest"] + (["stress-ng"] if load_cmd else [])
+    missing = [n for n in needed if not shutil.which(n)]
+    if missing:
+        die(f"{', '.join(missing)} 가 없습니다: sudo apt install rt-tests stress-ng")
+    preflight(args, groups)
+
+    ncpu = os.cpu_count() or 1
+    rt_cpu = args.rt_cpu if args.rt_cpu < ncpu else 0
+    other_cpus = ",".join(str(c) for c in range(ncpu) if c != rt_cpu)
+    realtime_file = "/sys/kernel/realtime"
+    is_rt = os.path.exists(realtime_file) and open(realtime_file).read().strip() == "1"
+    if not is_rt:
+        log("[경고] PREEMPT_RT 커널이 아닙니다 — 이 결과는 '도구 유무에 따른 신호가 보이는지' 확인하는 "
+            "파일럿으로만 쓰세요(실시간 커널 결과로 인용 금지).")
+    if ncpu < 2:
+        log("[경고] CPU가 1개라 부하를 다른 코어로 분리할 수 없습니다.")
+
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    os.makedirs(RESULTS_DIR, exist_ok=True)
+    logdir = os.path.join(RESULTS_DIR, f"rt_pilot_logs_{ts}")
+    os.makedirs(logdir)
+    out_path = os.path.join(RESULTS_DIR, f"rt_pilot_raw_{ts}.csv")
+    meta_path = os.path.join(RESULTS_DIR, f"rt_pilot_meta_{ts}.json")
+    meta = collect_meta(args, groups)
+    meta.update({"preempt_rt": is_rt, "uname_v": run(["uname", "-v"]).stdout.strip(),
+                 "rt_cpu": rt_cpu, "load_cpus": other_cpus,
+                 "cyclictest_version": (run(["cyclictest", "--version"]).stdout
+                                        + run(["cyclictest", "--version"]).stderr).strip()})
+    with open(meta_path, "w", encoding="utf-8") as f:
+        json.dump(meta, f, ensure_ascii=False, indent=2)
+
+    cyc_cmd = ["cyclictest", "-q", "-m", "-p", str(args.rt_prio), "-i", str(args.interval_us),
+               "-D", f"{args.duration}s", "-t", "1", "-a", str(rt_cpu), "-h", str(args.hist_max)]
+    log(f"cyclictest: {' '.join(cyc_cmd)}")
+    log(f"부하: {args.load_args or '(없음)'} (코어 {other_cpus or '분리 안 함'}) | "
+        f"그룹 {', '.join(groups)} | 반복 {args.repeats}회 × {args.duration}s")
+
+    rows = []
+    try:
+        for rep in range(1, args.repeats + 1):
+            order = groups if rep % 2 == 1 else list(reversed(groups))
+            for group in order:
+                log(f"\n=== rep {rep}/{args.repeats} · {group} ===")
+                tool = make_tool(group, args, logdir, capture_events=False)
+                load = None
+                try:
+                    tool.start()
+                    if load_cmd:
+                        cmd = ["stress-ng"] + load_cmd + ["--timeout", f"{args.duration + 30}s"]
+                        if other_cpus:
+                            cmd = ["taskset", "-c", other_cpus] + cmd
+                        load = subprocess.Popen(cmd, stdout=subprocess.DEVNULL,
+                                                stderr=subprocess.DEVNULL, start_new_session=True)
+                        time.sleep(2)
+                    r = run(cyc_cmd, timeout=args.duration + 60)
+                finally:
+                    terminate(load, timeout=10)
+                    tool.stop()
+                with open(os.path.join(logdir, f"cyclictest_{group}_{rep}.txt"), "w",
+                          encoding="utf-8") as f:
+                    f.write(r.stdout + "\n--- stderr ---\n" + r.stderr)
+                buckets, summ = parse_cyclictest(r.stdout)
+                if r.returncode != 0 or not buckets or "max" not in summ:
+                    log(f"  [경고] cyclictest 결과를 읽지 못했습니다(rc={r.returncode}): "
+                        f"{(r.stderr or r.stdout)[-300:].strip()}")
+                else:
+                    overflow = summ.get("overflow", 0)
+                    q, total = hist_quantiles(buckets, overflow, (0.99, 0.999, 0.9999))
+                    row = {"group": group, "rep": rep, "min_us": summ.get("min"),
+                           "avg_us": summ.get("avg"), "max_us": summ["max"],
+                           "p99_us": q[0.99], "p999_us": q[0.999], "p9999_us": q[0.9999],
+                           "samples": total, "overflow": overflow}
+                    rows.append(row)
+                    log(f"  avg {row['avg_us']}µs  p99 {row['p99_us']}  p99.9 {row['p999_us']}  "
+                        f"p99.99 {row['p9999_us']}  max {row['max_us']}µs  (표본 {total}, 상한초과 {overflow})")
+                time.sleep(args.cooldown)
+    finally:
+        if rows:
+            with open(out_path, "w", newline="", encoding="utf-8") as f:
+                w = csv.DictWriter(f, fieldnames=RT_PILOT_FIELDS)
+                w.writeheader()
+                w.writerows(rows)
+        chown_tree(logdir)
+        for p in (out_path, meta_path):
+            if os.path.exists(p):
+                chown_tree(p)
+
+    log(f"\n원시 결과: {out_path}\n메타데이터: {meta_path}")
+    log(f"\n[요약] 반복 간 평균 ± SD (µs) — PREEMPT_RT: {is_rt}")
+    for key, label in (("avg_us", "avg"), ("p99_us", "p99"), ("p9999_us", "p99.99"), ("max_us", "max")):
+        log(f"  {label}:")
+        for group in groups:
+            vals = [r[key] for r in rows if r["group"] == group and isinstance(r[key], (int, float))]
+            if not vals:
+                log(f"    {group:<10}: 값 없음(상한 초과 또는 실패)")
+                continue
+            mean = sum(vals) / len(vals)
+            sd = (sum((v - mean) ** 2 for v in vals) / (len(vals) - 1)) ** 0.5 if len(vals) > 1 else 0.0
+            log(f"    {group:<10}: N={len(vals)}  {mean:.1f} ± {sd:.1f}  (최소 {min(vals)}, 최대 {max(vals)})")
+    log("\n해석 주의: max는 한 번의 극단값이라 반복마다 크게 흔들린다. 파일럿에서는 'off 대비 "
+        "p99.99·max가 반복 간 변동폭을 넘어 일관되게 벌어지는가'만 본다. 이 결과는 본 실험이 아니다.")
+
+
 def parse_groups(args):
     groups = [g.strip() for g in args.groups.split(",") if g.strip()]
     bad = [g for g in groups if g not in ALL_GROUPS]
@@ -1365,6 +1523,16 @@ def build_parser():
     rg.add_argument("--probe-timeout", type=float, default=5.0, help="공격 1회 완료 대기(초)")
     rg.add_argument("--settle", type=float, default=1.5,
                     help="기준 공격 확인 시 로그 반영 대기(초) — detect와 동일 기본값")
+
+    rt = sub.add_parser("rt-pilot", help="보안 도구가 실시간 지연(cyclictest)에 주는 영향 파일럿")
+    rt.add_argument("--repeats", type=int, default=3, help="그룹당 반복 횟수(그룹 순서는 반복마다 뒤집음)")
+    rt.add_argument("--duration", type=int, default=120, help="cyclictest 1회 측정 시간(초)")
+    rt.add_argument("--interval-us", type=int, default=1000, help="실시간 작업 주기(µs)")
+    rt.add_argument("--rt-prio", type=int, default=80, help="SCHED_FIFO 우선순위")
+    rt.add_argument("--rt-cpu", type=int, default=1, help="cyclictest를 고정할 CPU 번호")
+    rt.add_argument("--hist-max", type=int, default=2000, help="히스토그램 상한(µs)")
+    rt.add_argument("--load-args", default="--open 2 --fork 2 --pipe 2",
+                    help="stress-ng 인자(시스템콜 이벤트를 만드는 부하). 빈 문자열이면 부하 없음")
     return p
 
 
@@ -1372,7 +1540,7 @@ def main():
     parser = build_parser()
     args = parser.parse_args()
     handlers = {"check": cmd_check, "perf": cmd_perf, "detect": cmd_detect, "latency": cmd_latency,
-                "restart-gap": cmd_restart_gap}
+                "restart-gap": cmd_restart_gap, "rt-pilot": cmd_rt_pilot}
     if args.cmd not in handlers:
         parser.print_help()
         return
